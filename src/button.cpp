@@ -30,6 +30,10 @@ TrainingAlertStyle trainingSubModeIndex = TrainingAlertStyle::Instant;
 uint8_t therapySubModeIndex = 0;
 unsigned long lastModeChangeMs = 0;
 
+static bool offPrinted = true;
+static bool trainingStarted = true;
+static bool waitRelease = false;
+
 // OneButton instance: active LOW, internal pull-up enabled
 static OneButton btn(PIN_BUTTON, true, true);
 
@@ -41,31 +45,56 @@ static void playButtonPressHaptic() {
   motorOverrideDuty(150, 125);
 }
 
-static void printCurrentMode() {
-  DEBUG_PRINT("Mode: ");
-  DEBUG_PRINTLN(modeNames[currentMode]);
-  if (currentMode == MODE_THERAPY) {
-    DEBUG_PRINT("Therapy Sub-Mode: ");
-    DEBUG_PRINTLN(therapySubModes[therapySubModeIndex]);
+void setDeviceMode(Mode newMode) {
+  if (currentMode == newMode) {
+    return;
+  }
+
+  // 1. Stop active tasks in the PREVIOUS mode immediately
+  if (currentMode == MODE_TRAINING) {
+    trainingStop();
+  } else if (currentMode == MODE_THERAPY) {
+    therapyStop(false);
+  }
+
+  if (isCalibrating()) {
+    calibrationRequestCancel();
+  }
+
+  motorSetDuty(0);
+
+  // 2. Transition to new mode
+  currentMode = newMode;
+  lastModeChangeMs = millis();
+
+  // 3. Reset state flags
+  if (currentMode == MODE_OFF) {
+    offPrinted = false;
+  } else if (currentMode == MODE_TRAINING) {
+    trainingStarted = false;
   }
 }
 
 static void handleSingleClick() {
-  // Cycle modes: Training -> Therapy -> Off -> Training
-  currentMode = (Mode)((currentMode + 1) % MODE_COUNT);
-  lastModeChangeMs = millis();
-
-  // Stop any active tasks immediately (vibration and therapy)
-  if (therapyIsRunning()) {
-    therapyStop(false);
+  if (isCalibrating()) {
+    DEBUG_PRINTLN("Button click detected during calibration - canceling");
+    setDeviceMode(MODE_TRAINING);
+    return;
   }
-  motorSetDuty(0);
 
-  printCurrentMode();
+  // Cycle modes: Training -> Therapy -> Off -> Training
+  Mode nextMode = (Mode)((currentMode + 1) % MODE_COUNT);
+  setDeviceMode(nextMode);
 }
 
 static void handleDoubleClick() {
   DEBUG_PRINTLN("Double click");
+
+  if (isCalibrating()) {
+    DEBUG_PRINTLN("Button double-click detected during calibration - canceling");
+    setDeviceMode(MODE_TRAINING);
+    return;
+  }
 
   // Play haptic feedback for the double click event
   playButtonPressHaptic();
@@ -94,15 +123,20 @@ static void handleDoubleClick() {
 
 static void handleHold() {
   DEBUG_PRINTLN("Hold");
+
+  if (isCalibrating()) {
+    DEBUG_PRINTLN("Button hold detected during calibration - canceling");
+    setDeviceMode(MODE_TRAINING);
+    return;
+  }
+
   if (currentMode == MODE_OFF) {
     DEBUG_PRINTLN("Hold ignored in OFF mode");
     return;
   }
-  if (isCalibrating()) {
-    calibrationRequestCancel();
-  } else {
-    calibrationRequestStart();
-  }
+
+  calibrationRequestStart();
+  waitRelease = true; // Wait for the hold button to be released
 }
 
 void buttonSetup() {
@@ -119,14 +153,26 @@ void buttonSetup() {
 
   DEBUG_PRINTLN("Device ON");
   currentMode = MODE_TRAINING;
-  printCurrentMode();
+  trainingStarted = false;
+  offPrinted = true;
 }
-
-static bool offPrinted = true;
-static bool trainingStarted = true;
 
 void buttonLoop() {
   btn.tick();
+
+  // If calibrating, check for physical button press to cancel immediately
+  if (isCalibrating()) {
+    if (digitalRead(PIN_BUTTON) == LOW) {
+      if (!waitRelease) {
+        DEBUG_PRINTLN("Button press detected during calibration - canceling");
+        setDeviceMode(MODE_TRAINING);
+      }
+    } else {
+      waitRelease = false;
+    }
+  } else {
+    waitRelease = false;
+  }
 
   bool isTransitioning = (millis() - lastModeChangeMs < 1000);
 
@@ -146,12 +192,6 @@ void buttonLoop() {
       DEBUG_PRINTLN("Therapy auto-start (mode is Therapy)");
       deviceOn = true;
       therapyStart();
-    }
-  } else {
-    if (currentMode == MODE_OFF) {
-      offPrinted = false;
-    } else if (currentMode == MODE_TRAINING) {
-      trainingStarted = false;
     }
   }
 }

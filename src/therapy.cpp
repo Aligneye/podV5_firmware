@@ -283,9 +283,7 @@ void therapyStop(bool returnToTraining) {
     patternsInitialized = false;
     if (returnToTraining) {
         rtt.println("Therapy: session complete — switching to Training mode");
-        currentMode = MODE_TRAINING;
-        rtt.print("Mode: ");
-        rtt.println(modeNames[currentMode]);
+        setDeviceMode(MODE_TRAINING);
     }
     onTherapyEnded();
 }

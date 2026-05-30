@@ -51,11 +51,8 @@ static unsigned long s_failVibEndMs     = 0;
 static unsigned long s_successPulseEndMs = 0;
 
 static void goToTrainingMode() {
-    if (therapyIsRunning()) {
-        therapyStop(false);
-    }
     deviceOn = true;
-    currentMode = MODE_TRAINING;
+    setDeviceMode(MODE_TRAINING);
 }
 
 /** ESP32 playCalibrationFeedback: MAX ~150 ms */

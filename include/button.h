@@ -39,3 +39,5 @@ extern unsigned long lastModeChangeMs;
 // ── Public API ─────────────────────────────────────────────────────────────
 void buttonSetup();
 void buttonLoop();
+void setDeviceMode(Mode newMode);
+
