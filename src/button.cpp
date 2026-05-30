@@ -1,10 +1,11 @@
 #include "button.h"
-#include "autoOff.h"
 #include "bluetooth.h"
 #include "calibration.h"
 #include "motor.h"
 #include "storage.h"
 #include "therapy.h"
+#include "device_time.h"
+#include "training.h"
 #include <OneButton.h>
 
 #ifdef DEBUG_LOGGING
@@ -27,6 +28,7 @@ bool deviceOn = true;
 Mode currentMode = MODE_TRAINING;
 TrainingAlertStyle trainingSubModeIndex = TrainingAlertStyle::Instant;
 uint8_t therapySubModeIndex = 0;
+unsigned long lastModeChangeMs = 0;
 
 // OneButton instance: active LOW, internal pull-up enabled
 static OneButton btn(PIN_BUTTON, true, true);
@@ -36,7 +38,7 @@ static void playButtonPressHaptic() {
     return;
   // Use a low duty cycle (80) to prevent brownout reset while providing haptic
   // feedback
-  motorOverrideDuty(30, 70);
+  motorOverrideDuty(150, 125);
 }
 
 static void printCurrentMode() {
@@ -49,39 +51,21 @@ static void printCurrentMode() {
 }
 
 static void handleSingleClick() {
-  autoOffMarkActivity();
-
   // Cycle modes: Training -> Therapy -> Off -> Training
   currentMode = (Mode)((currentMode + 1) % MODE_COUNT);
+  lastModeChangeMs = millis();
 
-  switch (currentMode) {
-  case MODE_TRAINING:
-    deviceOn = true;
-    bluetoothStartAdvertising();
-    break;
-
-  case MODE_THERAPY:
-    deviceOn = true;
-    therapyStart();
-    break;
-
-  case MODE_OFF:
-    if (therapyIsRunning()) {
-      therapyStop(false);
-    }
-    powerOff();
-    break;
-
-  default:
-    break;
+  // Stop any active tasks immediately (vibration and therapy)
+  if (therapyIsRunning()) {
+    therapyStop(false);
   }
+  motorSetDuty(0);
 
   printCurrentMode();
 }
 
 static void handleDoubleClick() {
   DEBUG_PRINTLN("Double click");
-  autoOffMarkActivity();
 
   // Play haptic feedback for the double click event
   playButtonPressHaptic();
@@ -110,7 +94,6 @@ static void handleDoubleClick() {
 
 static void handleHold() {
   DEBUG_PRINTLN("Hold");
-  autoOffMarkActivity();
   if (currentMode == MODE_OFF) {
     DEBUG_PRINTLN("Hold ignored in OFF mode");
     return;
@@ -139,11 +122,36 @@ void buttonSetup() {
   printCurrentMode();
 }
 
+static bool offPrinted = true;
+static bool trainingStarted = true;
+
 void buttonLoop() {
   btn.tick();
 
-  if (currentMode == MODE_THERAPY && !therapyIsRunning() && !isCalibrating()) {
-    DEBUG_PRINTLN("Therapy auto-start (mode is Therapy)");
-    therapyStart();
+  bool isTransitioning = (millis() - lastModeChangeMs < 1000);
+
+  if (!isTransitioning) {
+    if (currentMode == MODE_OFF && !offPrinted) {
+      rtt.println("off");
+      offPrinted = true;
+    }
+
+    if (currentMode == MODE_TRAINING && !trainingStarted) {
+      deviceOn = true;
+      bluetoothStartAdvertising();
+      trainingStarted = true;
+    }
+
+    if (currentMode == MODE_THERAPY && !therapyIsRunning() && !isCalibrating()) {
+      DEBUG_PRINTLN("Therapy auto-start (mode is Therapy)");
+      deviceOn = true;
+      therapyStart();
+    }
+  } else {
+    if (currentMode == MODE_OFF) {
+      offPrinted = false;
+    } else if (currentMode == MODE_TRAINING) {
+      trainingStarted = false;
+    }
   }
 }

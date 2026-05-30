@@ -4,7 +4,6 @@
 #include "button.h"
 #include "training.h"
 #include "device_time.h"
-#include "autoOff.h"
 #include "session_stats.h"
 #include <bluefruit.h>
 
@@ -188,9 +187,6 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
     String payload = payloadRaw;
     payload.trim();
     if (payload.length() == 0) return;
-
-    // Reset auto off timer on BLE activity
-    autoOffMarkActivity();
 
     String requestedMode = "";
     int start = 0;

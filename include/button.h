@@ -34,6 +34,7 @@ enum class TrainingAlertStyle : uint8_t {
 extern Mode               currentMode;
 extern TrainingAlertStyle trainingSubModeIndex;
 extern uint8_t therapySubModeIndex;
+extern unsigned long lastModeChangeMs;
 
 // ── Public API ─────────────────────────────────────────────────────────────
 void buttonSetup();

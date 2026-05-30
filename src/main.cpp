@@ -8,7 +8,6 @@
 #include "training.h"
 #include "calibration.h"
 #include "bluetooth.h"
-#include "autoOff.h"
 #include "device_time.h"
 #include "motor.h"
 #include "session_stats.h"
@@ -47,20 +46,21 @@ void setup() {
     calibrationSetup();
     bluetoothSetup();
     initDeviceTime();
-    initAutoOff();
 }
 
 void loop() {
     buttonLoop();
+    motorUpdate();
+    if (currentMode == MODE_OFF || (millis() - lastModeChangeMs < 1000)) {
+        return;
+    }
     therapyLoop();
     // Training first: posture motor is authoritative unless calibration idle-handler
     // applies short success/fail buzz afterward (see calibration.cpp).
     trainingLoop();
     calibrationLoop();
     bluetoothLoop();
-    motorUpdate();
     maintainDeviceTime();
-    checkAutoOff();
     updateSessionStats();
     maintainSessionStats();
 }

@@ -203,6 +203,7 @@ static bool s_vibOn = false;
 
 /** Motor uses same rule as ESP32 isBadPosture (forward > 25° + debounce). */
 static bool s_forwardMotorBad = false;
+static unsigned long s_trainingStartMs = 0;
 
 static void loadStoredCalibration() {
   float loadedY = kDefaultOriginY;
@@ -447,6 +448,15 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     return;
   }
 
+  // Give a 1-second grace period at the start of training session
+  if (now - s_trainingStartMs < 1000UL) {
+    motorSetDuty(0);
+    s_badMotorStartMs = 0;
+    s_vibOn = false;
+    s_vibToggleMs = 0;
+    return;
+  }
+
   if (static_cast<uint8_t>(trainingSubModeIndex) >= TRAINING_SUBMODE_COUNT) {
     trainingSubModeIndex = TrainingAlertStyle::Instant;
   }
@@ -503,6 +513,7 @@ uint32_t getDeviceStepCount() { return stepCountGetTotal(); }
 
 void trainingStart() {
   rtt.println("Training: start");
+  s_trainingStartMs = millis();
   onTrainingStarted();
 }
 
