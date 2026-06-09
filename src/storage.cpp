@@ -1,4 +1,5 @@
 #include "storage.h"
+#include "calibration.h"
 #include "session_log.h"
 #include "therapy.h"
 #include "nrf.h"
@@ -14,13 +15,22 @@ extern RTTStream rtt;
 // this project place the application well below this address.
 static constexpr uint32_t SETTINGS_PAGE_ADDR = 0x00073000UL;
 static constexpr uint32_t SETTINGS_MAGIC     = 0x414C4733UL;  // "ALG3"
-static constexpr uint16_t SETTINGS_VERSION   = 3u;
+static constexpr uint16_t SETTINGS_VERSION   = 4u;
 
 struct PersistedSettingsV1 {
     uint32_t magic;
     uint16_t version;
     uint8_t  therapySubModeIndex;
     uint8_t  reserved;
+};
+
+struct PersistedSettingsV3 {
+    uint32_t magic;
+    uint16_t version;
+    uint8_t  trainingDelay;
+    uint8_t  reserved;
+    float     calY;
+    float     calZ;
 };
 
 struct PersistedSettings {
@@ -30,6 +40,9 @@ struct PersistedSettings {
     uint8_t  reserved;
     float     calY;
     float     calZ;
+    uint8_t            profileCount;
+    uint8_t            reserved2[3];
+    OrientationProfile profiles[8];
 };
 
 static PersistedSettings g_settings = {
@@ -38,7 +51,10 @@ static PersistedSettings g_settings = {
     (uint8_t)TRAIN_INSTANT,
     0u,
     6.75f,
-    6.75f
+    6.75f,
+    0u,
+    {0, 0, 0},
+    {}
 };
 
 // ── NVMC helpers ───────────────────────────────────────────────────────────
@@ -87,30 +103,54 @@ static bool loadFromFlash() {
     if (*magic != SETTINGS_MAGIC) return false;
 
     const uint16_t* ver = reinterpret_cast<const uint16_t*>(base + 4);
-    if (*ver == 1u) {
-        g_settings.magic                = SETTINGS_MAGIC;
-        g_settings.version              = SETTINGS_VERSION;
-        g_settings.trainingDelay        = (uint8_t)TRAIN_INSTANT;
-        g_settings.reserved             = 0;
-        g_settings.calY                 = 6.75f;
-        g_settings.calZ                 = 6.75f;
-        persist();  // migrate flash layout v1 -> v3
-        return true;
-    }
-    if (*ver == 2u) {
-        const PersistedSettings* v2 =
-            reinterpret_cast<const PersistedSettings*>(SETTINGS_PAGE_ADDR);
-        g_settings.magic         = SETTINGS_MAGIC;
-        g_settings.version       = SETTINGS_VERSION;
-        g_settings.trainingDelay = (uint8_t)TRAIN_INSTANT;
-        g_settings.reserved      = 0;
-        g_settings.calY          = v2->calY;
-        g_settings.calZ          = v2->calZ;
-        if (fabsf(g_settings.calY) < 0.1f && fabsf(g_settings.calZ) < 0.1f) {
-            g_settings.calY = 6.75f;
-            g_settings.calZ = 6.75f;
+    if (*ver == 1u || *ver == 2u || *ver == 3u) {
+        uint8_t trainingDelay = (uint8_t)TRAIN_INSTANT;
+        float calY = 6.75f;
+        float calZ = 6.75f;
+
+        if (*ver == 2u || *ver == 3u) {
+            const PersistedSettingsV3* oldSettings =
+                reinterpret_cast<const PersistedSettingsV3*>(SETTINGS_PAGE_ADDR);
+            trainingDelay = oldSettings->trainingDelay;
+            calY = oldSettings->calY;
+            calZ = oldSettings->calZ;
         }
-        persist();  // migrate flash layout v2 -> v3
+
+        if (fabsf(calY) < 0.1f && fabsf(calZ) < 0.1f) {
+            calY = 6.75f;
+            calZ = 6.75f;
+        }
+
+        // Reconstruct refX using the heuristic check for gravity units (calY^2 + calZ^2 < 2.0f)
+        float magSq = calY * calY + calZ * calZ;
+        float refX = 0.0f;
+        if (magSq < 2.0f) {
+            // G-units
+            float diff = 1.0f - magSq;
+            refX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
+        } else {
+            // m/s^2
+            float diff = (9.80665f * 9.80665f) - magSq;
+            refX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
+        }
+
+        g_settings.magic = SETTINGS_MAGIC;
+        g_settings.version = SETTINGS_VERSION;
+        g_settings.trainingDelay = trainingDelay;
+        g_settings.reserved = 0;
+        g_settings.calY = calY;
+        g_settings.calZ = calZ;
+        g_settings.profileCount = 1;
+        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+
+        strncpy(g_settings.profiles[0].name, "Default Vertical", sizeof(g_settings.profiles[0].name) - 1);
+        g_settings.profiles[0].name[sizeof(g_settings.profiles[0].name) - 1] = '\0';
+        g_settings.profiles[0].refX = refX;
+        g_settings.profiles[0].refY = calY;
+        g_settings.profiles[0].refZ = calZ;
+        g_settings.profiles[0].createdAt = 0;
+
+        persist();  // migrate flash layout to v4
         return true;
     }
     if (*ver != SETTINGS_VERSION) return false;
@@ -187,3 +227,30 @@ void storageSaveCalibration(float y, float z) {
     persist();
     rtt.println("Storage: saved posture calibration");
 }
+
+bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
+    if (!profiles || !count) return false;
+    *count = g_settings.profileCount;
+    if (g_settings.profileCount > 8) {
+        g_settings.profileCount = 8;
+        *count = 8;
+    }
+    memcpy(profiles, g_settings.profiles, g_settings.profileCount * sizeof(OrientationProfile));
+    return true;
+}
+
+void storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
+    if (!profiles) return;
+    uint8_t countToSave = count;
+    if (countToSave > 8) countToSave = 8;
+    g_settings.profileCount = countToSave;
+    memcpy(g_settings.profiles, profiles, countToSave * sizeof(OrientationProfile));
+
+    // For backward compatibility, keep calY and calZ in sync with the first profile
+    if (countToSave > 0) {
+        g_settings.calY = g_settings.profiles[0].refY;
+        g_settings.calZ = g_settings.profiles[0].refZ;
+    }
+    persist();
+}
+

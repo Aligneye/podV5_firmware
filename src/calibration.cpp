@@ -3,118 +3,336 @@
 #include "motor.h"
 #include "therapy.h"
 #include "training.h"
+#include "storage.h"
 #include <math.h>
 #include <string.h>
 
 extern RTTStream rtt;
 
-// ── Mirror correctv1deviceEsp32c3-main/src/calibration.cpp + vibration timings ──
-enum CalibState { CALIB_IDLE, CALIB_HOLD };
-static CalibState calibState = CALIB_IDLE;
+// ── State Machine Timings ───────────────────────────────────────────────────
+enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };
+static CalibState calibState = CALIB_STATE_IDLE;
 
-static constexpr uint32_t CALIB_GET_READY_MS       = 3000UL;
-static constexpr uint32_t CALIB_HOLD_MS          = 5000UL;
-static constexpr uint32_t CALIB_TOTAL_MS         = CALIB_GET_READY_MS + CALIB_HOLD_MS;
+static constexpr uint32_t CALIB_GET_READY_MS       = 0UL;
+static constexpr uint32_t CALIB_HOLD_MS            = 5000UL;
+static constexpr uint32_t CALIB_TOTAL_MS           = CALIB_GET_READY_MS + CALIB_HOLD_MS;
 static constexpr uint32_t CALIB_RESULT_BROADCAST_MS = 4000UL;
-static constexpr uint32_t kSafetyTimeoutMs       = 10000UL;
-static constexpr uint32_t kSampleIntervalMs    = 50UL;
-
-/** Start pulse — same role as ESP32 `playCalibrationFeedback(true)` initial buzz. */
-static constexpr uint32_t kCalibMotorPulseMs = 150UL;
-/** GET_READY tick — same as ESP32 `playButtonFeedback()` (~30 ms). */
-static constexpr uint32_t kCalibTickPulseMs = 30UL;
-/** Failure / timeout — ESP32 used `startVibration(255); delay(2000);`. */
-static constexpr uint32_t kCalibFailMotorMs = 2000UL;
-/** Success — ESP32 used `startVibration(255); delay(1000);`. */
-static constexpr uint32_t kCalibSuccessMotorMs = 1000UL;
+static constexpr uint32_t kSafetyTimeoutMs         = 10000UL;
+static constexpr uint32_t kSampleIntervalMs        = 50UL;
+static constexpr int      MIN_VALID_SAMPLES        = 70;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
 
 static unsigned long stabilityStartTime = 0;
 static unsigned long lastBeepTime       = 0;
-static float         lastCalibX       = 0;
-static float         lastCalibY       = 0;
-static float         lastCalibZ       = 0;
+static unsigned long lastHoldPrintMs     = 0;
+static float         lastCalibX         = 0;
+static float         lastCalibY         = 0;
+static float         lastCalibZ         = 0;
 
-static float         sumY        = 0;
-static float         sumZ        = 0;
-static int           sampleCount = 0;
-static unsigned long s_lastSampleTime = 0;
+static float         sumX               = 0;
+static float         sumY               = 0;
+static float         sumZ               = 0;
+static int           sampleCount        = 0;
+static int           totalSamples       = 0;
+static unsigned long s_lastSampleTime   = 0;
+
+static float         samplesX[100];
+static float         samplesY[100];
+static float         samplesZ[100];
 
 static char          lastCalibrationResult[16] = "";
-static unsigned long calibrationResultSetAt   = 0;
+static unsigned long calibrationResultSetAt    = 0;
 
-static unsigned long s_calibPulseEndMs  = 0;
-static unsigned long s_tickPulseEndMs   = 0;
-static unsigned long s_failVibEndMs     = 0;
+static unsigned long s_failVibEndMs      = 0;
 static unsigned long s_successPulseEndMs = 0;
 
+// Temporary buffer for successful calibration before profile naming
+static float s_lastCalibratedX = 0.0f;
+static float s_lastCalibratedY = 0.0f;
+static float s_lastCalibratedZ = 0.0f;
+static bool  s_lastCalibrationValid = false;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
 static void goToTrainingMode() {
     deviceOn = true;
     setDeviceMode(MODE_TRAINING);
 }
 
-/** ESP32 playCalibrationFeedback: MAX ~150 ms */
-static void playCalibrationMotorPulse() {
-    const unsigned long t = millis();
-    s_calibPulseEndMs = t + kCalibMotorPulseMs;
-    motorSetDuty(VIB_INTENSITY_MAX);
+static void calibrationFail(const char* reason) {
+    calibState = CALIB_STATE_IDLE;
+    strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
+    lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
+    calibrationResultSetAt = millis();
+    
+    // Failure pulse: 500ms duration, 150 duty cycle
+    s_failVibEndMs = millis() + 500UL;
+    motorOverrideDuty(150, 500);
+
+    s_lastCalibrationValid = false;
+
+    // Exact console log format: "CALIB: BAD MOVEMENT - Failed" or generic "CALIBRATION FAILED: <reason>"
+    if (strcmp(reason, "Bad movement") == 0 || strcmp(reason, "Too much movement") == 0) {
+        rtt.println("CALIB: BAD MOVEMENT - Failed");
+    } else {
+        rtt.printf("CALIBRATION FAILED: %s\n", reason);
+    }
+
+    goToTrainingMode();
 }
 
-/** ESP32 playButtonFeedback: LOW ~30 ms */
-static void playButtonFeedbackMotor() {
-    s_tickPulseEndMs = millis() + kCalibTickPulseMs;
-    motorSetDuty(VIB_INTENSITY_LOW);
+static void calibrationSuccess(float avgX, float avgY, float avgZ) {
+    calibState = CALIB_STATE_IDLE;
+    strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
+    lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
+    calibrationResultSetAt = millis();
+    
+    // Success pulse: 125ms duration, 150 duty cycle
+    s_successPulseEndMs = millis() + 125UL;
+    motorOverrideDuty(150, 125);
+
+    s_lastCalibratedX = avgX;
+    s_lastCalibratedY = avgY;
+    s_lastCalibratedZ = avgZ;
+    s_lastCalibrationValid = true;
+
+    // Log exact formats
+    rtt.println("CALIBRATION: DONE");
+
+    // If empty profile database, auto-initialize as Default Vertical
+    if (getProfileCount() == 0) {
+        addOrUpdateProfile0(avgX, avgY, avgZ);
+    }
+
+    goToTrainingMode();
 }
 
-static void applyIdleMotorFeedback(uint32_t now) {
-    if (s_failVibEndMs != 0u) {
-        if ((int32_t)(now - s_failVibEndMs) < 0) {
-            motorSetDuty(VIB_INTENSITY_HIGH);
-        } else {
-            motorSetDuty(0);
-            s_failVibEndMs = 0;
-        }
-        return;
-    }
-    if (s_successPulseEndMs != 0u) {
-        if ((int32_t)(now - s_successPulseEndMs) < 0) {
-            motorSetDuty(VIB_INTENSITY_MAX);
-        } else {
-            motorSetDuty(0);
-            s_successPulseEndMs = 0;
-        }
-    }
-}
+// ── Temporary Calibration Results retrieval ─────────────────────────────────
+float getLastCalibratedX() { return s_lastCalibratedX; }
+float getLastCalibratedY() { return s_lastCalibratedY; }
+float getLastCalibratedZ() { return s_lastCalibratedZ; }
+bool isLastCalibrationValid() { return s_lastCalibrationValid; }
 
-/** During CALIB_HOLD: calibration pulse, then tick pulses, else off in GET_READY; off in HOLD. */
-static void applyHoldMotor(uint32_t now, unsigned long elapsed) {
-    if (now < s_calibPulseEndMs) {
-        motorSetDuty(VIB_INTENSITY_MAX);
-        return;
-    }
-    if (s_tickPulseEndMs != 0u && now < s_tickPulseEndMs) {
-        motorSetDuty(VIB_INTENSITY_LOW);
-        return;
-    }
-    if (elapsed >= CALIB_GET_READY_MS) {
-        motorSetDuty(0);
-        return;
-    }
-    motorSetDuty(0);
-}
-
+// ── Lifecycle ───────────────────────────────────────────────────────────────
 void initCalibration() {
-    calibState   = CALIB_IDLE;
+    calibState   = CALIB_STATE_IDLE;
     pendingStart = false;
     pendingCancel = false;
     motorSetDuty(0);
-    s_calibPulseEndMs   = 0;
-    s_tickPulseEndMs    = 0;
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastSampleTime    = 0;
+    s_lastCalibrationValid = false;
+    totalSamples = 0;
+
+    initProfiles();
+}
+
+void handleCalibration() {
+    const unsigned long currentMillis = millis();
+
+    if (pendingCancel) {
+        pendingCancel = false;
+        cancelCalibration();
+        return;
+    }
+    if (pendingStart && calibState == CALIB_STATE_IDLE) {
+        pendingStart = false;
+        startCalibration();
+        return;
+    }
+
+    if (calibState == CALIB_STATE_IDLE) {
+        return;
+    }
+
+    const unsigned long elapsed = currentMillis - stabilityStartTime;
+
+    static unsigned long lastDebugPrintMs = 0;
+    if (currentMillis - lastDebugPrintMs >= 1000UL) {
+        lastDebugPrintMs = currentMillis;
+        rtt.printf("DEBUG: calibState=%d, elapsed=%lu, totalSamples=%d, sampleCount=%d, dtSample=%lu\n",
+                   (int)calibState, elapsed, totalSamples, sampleCount, currentMillis - s_lastSampleTime);
+    }
+
+    if (elapsed > kSafetyTimeoutMs) {
+        calibrationFail("Timeout");
+        return;
+    }
+
+    if (calibState == CALIB_STATE_HOLD_STILL) {
+        // Detailed RTT prints for HOLD STILL countdown
+        if (currentMillis - lastHoldPrintMs >= 1000UL) {
+            lastHoldPrintMs = currentMillis;
+            uint32_t msLeft = (CALIB_TOTAL_MS > elapsed) ? (CALIB_TOTAL_MS - elapsed) : 0;
+            int secondsLeft = (msLeft + 500UL) / 1000UL;
+            if (secondsLeft > 0) {
+                rtt.printf("CALIBRATION: HOLD STILL - %d sec\n", secondsLeft);
+            }
+        }
+
+        if (currentMillis - s_lastSampleTime >= kSampleIntervalMs) {
+            s_lastSampleTime = currentMillis;
+
+            if (!trainingSampleAccelForCalibration()) {
+                calibrationFail("Lost accelerometer");
+                return;
+            }
+
+            if (totalSamples < 100) {
+                samplesX[totalSamples] = rawX;
+                samplesY[totalSamples] = rawY;
+                samplesZ[totalSamples] = rawZ;
+                totalSamples++;
+
+                // Print every sample values immediately
+                rtt.printf("CALIB: Sample #%d - raw[%s, %s, %s]\n",
+                           totalSamples, String(rawX, 2).c_str(), String(rawY, 2).c_str(), String(rawZ, 2).c_str());
+            }
+        }
+
+        if (elapsed >= CALIB_TOTAL_MS) {
+            if (totalSamples == 0) {
+                calibrationFail("Too few samples");
+                return;
+            }
+
+            // Pass 1: Calculate Mean of all collected samples
+            float sumAllX = 0, sumAllY = 0, sumAllZ = 0;
+            for (int i = 0; i < totalSamples; i++) {
+                sumAllX += samplesX[i];
+                sumAllY += samplesY[i];
+                sumAllZ += samplesZ[i];
+            }
+            float meanX = sumAllX / (float)totalSamples;
+            float meanY = sumAllY / (float)totalSamples;
+            float meanZ = sumAllZ / (float)totalSamples;
+
+            // Pass 2: Calculate Variance and Standard Deviation
+            float varX = 0, varY = 0, varZ = 0;
+            for (int i = 0; i < totalSamples; i++) {
+                float dx = samplesX[i] - meanX;
+                float dy = samplesY[i] - meanY;
+                float dz = samplesZ[i] - meanZ;
+                varX += dx * dx;
+                varY += dy * dy;
+                varZ += dz * dz;
+            }
+            float stdDevX = sqrtf(varX / (float)totalSamples);
+            float stdDevY = sqrtf(varY / (float)totalSamples);
+            float stdDevZ = sqrtf(varZ / (float)totalSamples);
+
+            // Log statistics
+            rtt.printf("CALIB STATS: Mean[%s, %s, %s], StdDev[%s, %s, %s]\n",
+                       String(meanX, 2).c_str(), String(meanY, 2).c_str(), String(meanZ, 2).c_str(),
+                       String(stdDevX, 2).c_str(), String(stdDevY, 2).c_str(), String(stdDevZ, 2).c_str());
+
+            // Safety limit: if standard deviation is too high, posture is too unstable
+            if (stdDevX > 1.0f || stdDevY > 1.0f || stdDevZ > 1.0f) {
+                calibrationFail("Too much movement");
+                return;
+            }
+
+            // Pass 3: Reject outliers (mean +/- 2*sigma) and compute final average
+            float finalSumX = 0, finalSumY = 0, finalSumZ = 0;
+            int validCount = 0;
+
+            for (int i = 0; i < totalSamples; i++) {
+                // If stdDev is near zero, accept all (protect from floating point edge case)
+                bool okX = (stdDevX < 0.01f) || (fabsf(samplesX[i] - meanX) <= 2.0f * stdDevX);
+                bool okY = (stdDevY < 0.01f) || (fabsf(samplesY[i] - meanY) <= 2.0f * stdDevY);
+                bool okZ = (stdDevZ < 0.01f) || (fabsf(samplesZ[i] - meanZ) <= 2.0f * stdDevZ);
+
+                if (okX && okY && okZ) {
+                    finalSumX += samplesX[i];
+                    finalSumY += samplesY[i];
+                    finalSumZ += samplesZ[i];
+                    validCount++;
+                } else {
+                    rtt.printf("CALIB: Outlier Sample #%d rejected - raw[%s, %s, %s]\n",
+                               i + 1, String(samplesX[i], 2).c_str(), String(samplesY[i], 2).c_str(), String(samplesZ[i], 2).c_str());
+                }
+            }
+
+            rtt.printf("CALIB RESULTS: Valid samples=%d/%d\n", validCount, totalSamples);
+
+            if (validCount < MIN_VALID_SAMPLES) {
+                calibrationFail("Too much movement");
+                return;
+            }
+
+            const float avgX = finalSumX / (float)validCount;
+            const float avgY = finalSumY / (float)validCount;
+            const float avgZ = finalSumZ / (float)validCount;
+            calibrationSuccess(avgX, avgY, avgZ);
+            return;
+        }
+    }
+}
+
+void requestCalibrationStart() {
+    pendingStart = true;
+}
+
+void requestCalibrationCancel() {
+    pendingCancel = true;
+    cancelCalibration();
+}
+
+void startCalibration() {
+    if (calibState != CALIB_STATE_IDLE) {
+        return;
+    }
+    if (!trainingSampleAccelForCalibration()) {
+        rtt.println("Calibration: cannot start (no accelerometer)");
+        return;
+    }
+
+    lastCalibrationResult[0] = '\0';
+    calibrationResultSetAt = 0;
+
+    deviceOn = true;
+    wakePostureSensor();
+    if (therapyIsRunning()) {
+        therapyStop(false);
+    }
+
+    // Start calibration with start haptic pulse (150 duty for 150ms)
+    motorOverrideDuty(150, 150);
+
+    calibState         = CALIB_STATE_HOLD_STILL;
+    stabilityStartTime = millis();
+    lastBeepTime       = millis();
+    lastHoldPrintMs    = millis();
+
+    sumX        = 0;
+    sumY        = 0;
+    sumZ        = 0;
+    sampleCount = 0;
+    totalSamples = 0;
+
+    lastCalibX = rawX;
+    lastCalibY = rawY;
+    lastCalibZ = rawZ;
+
+    s_lastSampleTime = millis();
+
+    rtt.println("CALIBRATION: START");
+    rtt.println("CALIBRATION: HOLD STILL - 5 sec");
+}
+
+void cancelCalibration() {
+    if (calibState == CALIB_STATE_IDLE) {
+        return;
+    }
+    rtt.println("CALIBRATION: CANCELLED");
+    calibState = CALIB_STATE_IDLE;
+    motorSetDuty(0);
+    s_failVibEndMs      = 0;
+    s_successPulseEndMs = 0;
+    s_lastCalibrationValid = false;
+    goToTrainingMode();
 }
 
 const char* getCalibrationResult() {
@@ -133,7 +351,7 @@ const char* getCalibrationResult() {
 }
 
 bool isCalibrating() {
-    return calibState != CALIB_IDLE;
+    return calibState != CALIB_STATE_IDLE;
 }
 
 uint32_t getCalibrationElapsedMs() {
@@ -151,207 +369,13 @@ const char* getCalibrationPhase() {
     if (!isCalibrating()) {
         return "IDLE";
     }
-    const unsigned long elapsed = getCalibrationElapsedMs();
-    if (elapsed < CALIB_GET_READY_MS) {
+    if (calibState == CALIB_STATE_GET_READY) {
         return "GET_READY";
     }
     return "HOLD_STILL";
 }
 
-void requestCalibrationStart() {
-    pendingStart = true;
-}
-
-void requestCalibrationCancel() {
-    pendingCancel = true;
-}
-
-void startCalibration() {
-    if (calibState != CALIB_IDLE) {
-        return;
-    }
-    if (!trainingSampleAccelForCalibration()) {
-        rtt.println("Calibration: cannot start (no accelerometer)");
-        return;
-    }
-
-    lastCalibrationResult[0] = '\0';
-    calibrationResultSetAt = 0;
-
-    deviceOn = true;
-    wakePostureSensor();
-    if (therapyIsRunning()) {
-        therapyStop(false);
-    }
-
-    playCalibrationMotorPulse();
-
-    calibState         = CALIB_HOLD;
-    stabilityStartTime = millis();
-    lastBeepTime       = millis();
-
-    sumY        = 0;
-    sumZ        = 0;
-    sampleCount = 0;
-
-    lastCalibX = rawX;
-    lastCalibY = rawY;
-    lastCalibZ = rawZ;
-
-    s_lastSampleTime = 0;
-
-    rtt.println("CALIBRATION: START");
-}
-
-void cancelCalibration() {
-    if (calibState == CALIB_IDLE) {
-        return;
-    }
-    rtt.println("CALIBRATION: CANCELLED");
-    calibState = CALIB_IDLE;
-    motorSetDuty(0);
-    s_calibPulseEndMs   = 0;
-    s_tickPulseEndMs    = 0;
-    s_failVibEndMs      = 0;
-    s_successPulseEndMs = 0;
-    goToTrainingMode();
-}
-
-void handleCalibration() {
-    const unsigned long currentMillis = millis();
-
-    if (pendingCancel) {
-        pendingCancel = false;
-        cancelCalibration();
-        applyIdleMotorFeedback(currentMillis);
-        return;
-    }
-    if (pendingStart && calibState == CALIB_IDLE) {
-        pendingStart = false;
-        startCalibration();
-        return;
-    }
-
-    if (calibState == CALIB_IDLE) {
-        applyIdleMotorFeedback(currentMillis);
-        return;
-    }
-
-    if (calibState != CALIB_HOLD) {
-        return;
-    }
-
-    const unsigned long elapsed = currentMillis - stabilityStartTime;
-
-    if (elapsed > kSafetyTimeoutMs) {
-        rtt.println("CALIB: TIMEOUT - Failed");
-        calibState = CALIB_IDLE;
-        strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
-        lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-        calibrationResultSetAt = millis();
-        s_failVibEndMs = millis() + kCalibFailMotorMs;
-        motorSetDuty(VIB_INTENSITY_HIGH);
-        goToTrainingMode();
-        return;
-    }
-
-    if (elapsed < CALIB_GET_READY_MS) {
-        if (currentMillis - lastBeepTime >= 1000UL) {
-            lastBeepTime = currentMillis;
-            playButtonFeedbackMotor();
-        }
-
-        if (trainingSampleAccelForCalibration()) {
-            lastCalibX = rawX;
-            lastCalibY = rawY;
-            lastCalibZ = rawZ;
-        }
-        sumY        = 0;
-        sumZ        = 0;
-        sampleCount = 0;
-
-        applyHoldMotor(currentMillis, elapsed);
-        return;
-    }
-
-    if (currentMillis - s_lastSampleTime >= kSampleIntervalMs) {
-        s_lastSampleTime = currentMillis;
-
-        if (!trainingSampleAccelForCalibration()) {
-            calibState = CALIB_IDLE;
-            strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
-            lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-            calibrationResultSetAt = millis();
-            s_failVibEndMs = millis() + kCalibFailMotorMs;
-            motorSetDuty(VIB_INTENSITY_HIGH);
-            goToTrainingMode();
-            return;
-        }
-
-        const float dy = fabsf(rawY - lastCalibY);
-        const float dz = fabsf(rawZ - lastCalibZ);
-        const float movement = dy + dz;
-
-        lastCalibX = rawX;
-        lastCalibY = rawY;
-        lastCalibZ = rawZ;
-
-        if (movement > CALIB_THRESHOLD) {
-            rtt.println("CALIB: BAD MOVEMENT - Failed");
-            calibState = CALIB_IDLE;
-            strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
-            lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-            calibrationResultSetAt = millis();
-            s_failVibEndMs = millis() + kCalibFailMotorMs;
-            motorSetDuty(VIB_INTENSITY_HIGH);
-            goToTrainingMode();
-            return;
-        }
-
-        sumY += rawY;
-        sumZ += rawZ;
-        sampleCount++;
-    }
-
-    if (elapsed > CALIB_TOTAL_MS) {
-        if (sampleCount < (int)CALIB_MIN_SAMPLES) {
-            rtt.println("CALIB: Too few samples - Failed");
-            calibState = CALIB_IDLE;
-            strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
-            lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-            calibrationResultSetAt = millis();
-            s_failVibEndMs = millis() + kCalibFailMotorMs;
-            motorSetDuty(VIB_INTENSITY_HIGH);
-            goToTrainingMode();
-            return;
-        }
-
-        const float avgY = sumY / (float)sampleCount;
-        const float avgZ = sumZ / (float)sampleCount;
-        setPostureOrigin(avgY, avgZ);
-
-        rtt.print("CALIBRATION: DONE. Samples:");
-        rtt.print(sampleCount);
-        rtt.print(" AvgY=");
-        rtt.print(avgY, 2);
-        rtt.print(" AvgZ=");
-        rtt.println(avgZ, 2);
-
-        calibState = CALIB_IDLE;
-        strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
-        lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-        calibrationResultSetAt = millis();
-
-        s_successPulseEndMs = millis() + kCalibSuccessMotorMs;
-        motorSetDuty(VIB_INTENSITY_MAX);
-
-        goToTrainingMode();
-        return;
-    }
-
-    applyHoldMotor(currentMillis, elapsed);
-}
-
+// ── Legacy Aliases ──────────────────────────────────────────────────────────
 void calibrationSetup() {
     initCalibration();
 }

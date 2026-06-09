@@ -68,6 +68,7 @@ float Z_ORIGIN = kDefaultOriginZ;
 float currentAngle = 0.0f;
 bool isBadPosture = false;
 bool sensorInitialized = false;
+bool s_bootProfileDetectionDone = false;
 
 char orientationText[16] = "UNKNOWN";
 char directionText[16] = "UNKNOWN";
@@ -162,7 +163,7 @@ static bool trainingIngestAccelSample(void) {
   const uint32_t stepBefore = stepCountGetTotal();
   stepCountProcessSample(rawX, rawY, rawZ, now);
   const uint32_t stepAfter = stepCountGetTotal();
-  if (stepAfter > stepBefore) {
+  if (!isCalibrating() && stepAfter > stepBefore) {
     rtt.print("[Step Trigger] count=");
     rtt.println((unsigned long)stepAfter);
   }
@@ -212,34 +213,22 @@ static void loadStoredCalibration() {
   if (fabsf(loadedY) < kNearZero && fabsf(loadedZ) < kNearZero) {
     loadedY = kDefaultOriginY;
     loadedZ = kDefaultOriginZ;
-  } else {
-    if (fabsf(loadedY) < kNearZero) {
-      loadedY = kDefaultOriginY;
-    }
-    if (fabsf(loadedZ) < kNearZero) {
-      loadedZ = kDefaultOriginZ;
-    }
   }
   Y_ORIGIN = loadedY;
   Z_ORIGIN = loadedZ;
 }
 
-void setPostureOrigin(float avgY, float avgZ) {
-  if (fabsf(avgY) < kNearZero && fabsf(avgZ) < kNearZero) {
-    avgY = kDefaultOriginY;
-    avgZ = kDefaultOriginZ;
-  }
-  Y_ORIGIN = fabsf(avgY);
+void setPostureOrigin3D(float avgX, float avgY, float avgZ) {
+  Y_ORIGIN = avgY;
   Z_ORIGIN = avgZ;
-  storageSaveCalibration(Y_ORIGIN, Z_ORIGIN);
 
   /*
    * Recalibration only updates origin; without re-seeding, g_f* still reflect
    * the old low-pass state so angle vs the new origin is wrong until the filter
-   * converges. Seed LPF from the calibration vector (y,z) and last raw X; align
+   * converges. Seed LPF from the calibration vector (x,y,z) and last raw; align
    * motion baseline.
    */
-  g_fx = rawX;
+  g_fx = avgX;
   g_fy = avgY;
   g_fz = avgZ;
   s_lpfSeeded = true;
@@ -250,21 +239,77 @@ void setPostureOrigin(float avgY, float avgZ) {
   isBadPosture = false;
 }
 
-/** ESP32 computePostureAngle: vertical frame, atan2 delta vs origin, clamp ±90°
- * (orientation only here). */
-static float computePostureAngle(float Y, float Z) {
-  const bool isVertical = (Y > 0.0f);
-  strncpy(orientationText, isVertical ? "VERTICAL" : "INVERTED",
-          sizeof(orientationText) - 1);
-  orientationText[sizeof(orientationText) - 1] = '\0';
+void setPostureOrigin(float avgY, float avgZ) {
+  if (fabsf(avgY) < kNearZero && fabsf(avgZ) < kNearZero) {
+    avgY = kDefaultOriginY;
+    avgZ = kDefaultOriginZ;
+  }
 
-  const float effY = isVertical ? Y : -Y;
+  // Reconstruct X based on unit heuristic
+  float magSq = avgY * avgY + avgZ * avgZ;
+  float avgX = 0.0f;
+  if (magSq < 2.0f) {
+      float diff = 1.0f - magSq;
+      avgX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
+  } else {
+      float diff = (9.80665f * 9.80665f) - magSq;
+      avgX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
+  }
+  setPostureOrigin3D(avgX, avgY, avgZ);
+}
 
-  const float currentAngleAbs = atan2f(Z, effY) * (180.0f / (float)M_PI);
-  const float originAngleAbs =
-      atan2f(Z_ORIGIN, Y_ORIGIN) * (180.0f / (float)M_PI);
-  float angle = currentAngleAbs - originAngleAbs;
+static float computePostureAngle(float X, float Y, float Z) {
+  const OrientationProfile* active = getActiveProfile();
 
+  // Use fallback values if no profile is active
+  float rx = 0.0f;
+  float ry = Y_ORIGIN;
+  float rz = Z_ORIGIN;
+
+  if (active) {
+    rx = active->refX;
+    ry = active->refY;
+    rz = active->refZ;
+
+    // Set orientationText to profile name
+    strncpy(orientationText, active->name, sizeof(orientationText) - 1);
+    orientationText[sizeof(orientationText) - 1] = '\0';
+  } else {
+    strncpy(orientationText, "UNKNOWN", sizeof(orientationText) - 1);
+    orientationText[sizeof(orientationText) - 1] = '\0';
+  }
+
+  // 1. Normalize the reference vector (R)
+  float magR = sqrtf(rx*rx + ry*ry + rz*rz);
+  if (magR < 0.001f) return 0.0f;
+  float vx = rx / magR;
+  float vy = ry / magR;
+  float vz = rz / magR;
+
+  // 2. Normalize the current filtered accelerometer vector (C)
+  float magC = sqrtf(X*X + Y*Y + Z*Z);
+  if (magC < 0.001f) return 0.0f;
+  float ax = X / magC;
+  float ay = Y / magC;
+  float az = Z / magC;
+
+  // 3. Cosine component: D = C . R
+  float dot = ax*vx + ay*vy + az*vz;
+
+  // 4. Perpendicular depth component: pz = az - D * vz
+  float pz = az - dot * vz;
+
+  // 5. Isolate sagittal plane (normalize by projection plane magnitude)
+  float planeMagSq = 1.0f - vz*vz;
+  float a_d = pz;
+  if (planeMagSq > 0.001f) {
+    a_d = pz / sqrtf(planeMagSq);
+  }
+
+  // 6. Calculate relative angle
+  float angle = atan2f(a_d, dot) * (180.0f / (float)M_PI);
+
+  // 7. Clamp angle to safety limits
   if (angle > kAngleClampDeg) {
     angle = kAngleClampDeg;
   }
@@ -337,27 +382,28 @@ void initPostureSensor(bool quick) {
   }
 }
 
-void updatePostureAngle() {
+bool updatePostureAngle() {
   if (!sensorInitialized)
-    return;
+    return false;
 
   if (!trainingIngestAccelSample()) {
-    return;
+    return false;
   }
 
+  const float X = g_fx;
   const float Y = g_fy;
   const float Z = g_fz;
 
-  const float dx = fabsf(rawX - s_motionPrevX);
-  const float dy = fabsf(rawY - s_motionPrevY);
-  const float dz = fabsf(rawZ - s_motionPrevZ);
+  const float dx = rawX - s_motionPrevX;
+  const float dy = rawY - s_motionPrevY;
+  const float dz = rawZ - s_motionPrevZ;
   s_motionPrevX = rawX;
   s_motionPrevY = rawY;
   s_motionPrevZ = rawZ;
-  const float motionStrength = dx + dy + dz;
+  const float motionStrength = sqrtf(dx*dx + dy*dy + dz*dz);
   _moving = (motionStrength > kMotionThreshold);
 
-  currentAngle = computePostureAngle(Y, Z);
+  currentAngle = computePostureAngle(X, Y, Z);
 
   if (currentAngle > kDirectionDeg) {
     strncpy(directionText, "FORWARD", sizeof(directionText) - 1);
@@ -400,6 +446,7 @@ void updatePostureAngle() {
   }
 
   s_forwardMotorBad = isBadPosture;
+  return true;
 }
 
 static void logTrainingSensorRtt(uint32_t now) {
@@ -445,6 +492,15 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   if (calibrationMotorActive()) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
+    return;
+  }
+
+  // If orientation is unknown (no active profile), do not trigger alerts / vibration
+  if (getActiveProfile() == nullptr) {
+    motorSetDuty(0);
+    s_badMotorStartMs = 0;
+    s_vibOn = false;
+    s_vibToggleMs = 0;
     return;
   }
 
@@ -532,6 +588,47 @@ void trainingSetup() {
   initPostureSensor();
 }
 
+static bool isOrientationDetectionReady(uint32_t now) {
+  if (now < 2000UL) {
+    return false;
+  }
+
+  static unsigned long stableStartMs = 0;
+  static float prevX = 0.0f, prevY = 0.0f, prevZ = 0.0f;
+  static bool firstCheck = true;
+
+  if (firstCheck) {
+    prevX = rawX;
+    prevY = rawY;
+    prevZ = rawZ;
+    firstCheck = false;
+    return false;
+  }
+
+  float dx = rawX - prevX;
+  float dy = rawY - prevY;
+  float dz = rawZ - prevZ;
+  prevX = rawX;
+  prevY = rawY;
+  prevZ = rawZ;
+
+  float motion = sqrtf(dx*dx + dy*dy + dz*dz);
+  constexpr float STABILITY_THRESHOLD = 0.5f;
+
+  if (motion < STABILITY_THRESHOLD) {
+    if (stableStartMs == 0) {
+      stableStartMs = now;
+    }
+    if (now - stableStartMs >= 1000UL) {
+      return true;
+    }
+  } else {
+    stableStartMs = 0; // reset
+  }
+
+  return false;
+}
+
 void trainingLoop() {
   const uint32_t now = millis();
 
@@ -548,13 +645,14 @@ void trainingLoop() {
     return;
   }
 
+  bool sampleReady = false;
   if (currentMode == MODE_TRAINING) {
     if (s_lastModeForSession != MODE_TRAINING) {
       wakePostureSensor();
       trainingStart();
       s_lastModeForSession = MODE_TRAINING;
     }
-    updatePostureAngle();
+    sampleReady = updatePostureAngle();
     applyTrainingMotorFeedback(now);
     logTrainingSensorRtt(now);
   } else {
@@ -562,5 +660,17 @@ void trainingLoop() {
       trainingStop();
     }
     s_lastModeForSession = currentMode;
+
+    if (sensorInitialized) {
+      sampleReady = trainingIngestAccelSample();
+    }
+  }
+
+  // --- Boot profile detection stability guard ---
+  if (!s_bootProfileDetectionDone && sensorInitialized && sampleReady) {
+    if (isOrientationDetectionReady(now)) {
+      detectCurrentOrientationProfile();
+      s_bootProfileDetectionDone = true;
+    }
   }
 }

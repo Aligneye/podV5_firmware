@@ -32,7 +32,6 @@ unsigned long lastModeChangeMs = 0;
 
 static bool offPrinted = true;
 static bool trainingStarted = true;
-static bool waitRelease = false;
 
 // OneButton instance: active LOW, internal pull-up enabled
 static OneButton btn(PIN_BUTTON, true, true);
@@ -125,8 +124,7 @@ static void handleHold() {
   DEBUG_PRINTLN("Hold");
 
   if (isCalibrating()) {
-    DEBUG_PRINTLN("Button hold detected during calibration - canceling");
-    setDeviceMode(MODE_TRAINING);
+    DEBUG_PRINTLN("Button hold detected during calibration - ignoring");
     return;
   }
 
@@ -136,7 +134,6 @@ static void handleHold() {
   }
 
   calibrationRequestStart();
-  waitRelease = true; // Wait for the hold button to be released
 }
 
 void buttonSetup() {
@@ -159,20 +156,6 @@ void buttonSetup() {
 
 void buttonLoop() {
   btn.tick();
-
-  // If calibrating, check for physical button press to cancel immediately
-  if (isCalibrating()) {
-    if (digitalRead(PIN_BUTTON) == LOW) {
-      if (!waitRelease) {
-        DEBUG_PRINTLN("Button press detected during calibration - canceling");
-        setDeviceMode(MODE_TRAINING);
-      }
-    } else {
-      waitRelease = false;
-    }
-  } else {
-    waitRelease = false;
-  }
 
   bool isTransitioning = (millis() - lastModeChangeMs < 1000);
 

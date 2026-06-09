@@ -4,7 +4,38 @@
 #include <RTTStream.h>
 #include "config.h"
 
-// ── Lifecycle (matches ESP32 reference naming) ─────────────────────────────
+// ── Profile Struct ──────────────────────────────────────────────────────────
+struct OrientationProfile {
+    char name[16];
+    float refX;
+    float refY;
+    float refZ;
+    uint32_t createdAt;
+};
+
+// ── Profile Storage APIs ────────────────────────────────────────────────────
+bool addCalibrationProfile(const char* name);
+bool deleteCalibrationProfile(uint8_t index);
+uint8_t getProfileCount();
+const OrientationProfile* getProfile(uint8_t index);
+
+// ── Active Profile APIs ─────────────────────────────────────────────────────
+int getActiveProfileIndex();
+const OrientationProfile* getActiveProfile();
+bool detectCurrentOrientationProfile();
+
+// ── Helper / Update API for training ───────────────────────────────────────
+void updateActiveProfileReference(float refX, float refY, float refZ);
+void addOrUpdateProfile0(float refX, float refY, float refZ);
+void initProfiles();
+
+// ── Temporary Calibration Results retrieval ─────────────────────────────────
+float getLastCalibratedX();
+float getLastCalibratedY();
+float getLastCalibratedZ();
+bool isLastCalibrationValid();
+
+// ── Lifecycle ───────────────────────────────────────────────────────────────
 void initCalibration();
 void handleCalibration();
 

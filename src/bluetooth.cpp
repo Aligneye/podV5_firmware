@@ -418,8 +418,10 @@ void bluetoothLoop() {
         pCharacteristic->notify(jsonBuffer);
     }
 
-    // Also write JSON to RTT
-    rtt.println(jsonBuffer);
+    // Also write JSON to RTT (suppressed during active calibration to avoid spamming logs)
+    if (!isCalibrating()) {
+        rtt.println(jsonBuffer);
+    }
 }
 
 void bluetoothStartAdvertising() {
