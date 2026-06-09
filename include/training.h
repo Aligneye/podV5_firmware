@@ -12,9 +12,10 @@ void trainingStop();
 
 /** Call when user sets upright reference from accelerometer (Y,Z in m/s²). */
 void setPostureOrigin(float y, float z);
+void setPostureOrigin3D(float x, float y, float z);
 
 void initPostureSensor(bool quick = false);
-void updatePostureAngle();
+bool updatePostureAngle();
 
 /** Read LIS3DH + LPF for calibration (any mode). Returns false if sensor missing. */
 bool trainingSampleAccelForCalibration(void);
@@ -35,6 +36,7 @@ extern float currentAngle;
 extern bool  isBadPosture;
 extern bool  sensorInitialized;
 extern float kBadPostureDeg;
+extern bool  s_bootProfileDetectionDone;
 
 /** Short text for RTT / BLE (no Arduino String). */
 extern char orientationText[16];
