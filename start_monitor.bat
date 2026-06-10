@@ -41,7 +41,7 @@ if not exist "%PIO%" (
 
 echo [RTT] Starting OpenOCD RTT server...
 
-start "OpenOCD RTT Server" /min "%OPENOCD%" ^
+start /b "OpenOCD RTT Server" "%OPENOCD%" ^
 -s "%OPENOCD_SCRIPTS%" ^
 -f interface/cmsis-dap.cfg ^
 -f target/nrf52.cfg ^
