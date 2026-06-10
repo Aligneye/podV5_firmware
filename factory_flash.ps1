@@ -42,5 +42,5 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "========================================="
 Write-Host " FACTORY FLASH SUCCESS"
-Write-Host " Now test RGB, BLE, App connection"
+Write-Host " NOW Upload the normal code"
 Write-Host "========================================="
