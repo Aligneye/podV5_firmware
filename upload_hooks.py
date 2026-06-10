@@ -1,37 +1,58 @@
-import subprocess
 import os
-
-def kill_openocd(source, target, env):
-    """Kill any running OpenOCD / start_rtt.bat processes before upload."""
-    print("--- Closing RTT server (OpenOCD) before upload ---")
-    # Kill openocd.exe so the debugger releases the probe
-    subprocess.call(
-        ["taskkill", "/F", "/IM", "openocd.exe"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False
-    )
-    # Also close any cmd window that was launched by start_rtt.bat
-    # (the window title contains "start_rtt" or the script path)
-    subprocess.call(
-        ["taskkill", "/F", "/FI", "WINDOWTITLE eq start_rtt*"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=True
-    )
-
-
-def start_monitor_after_upload(source, target, env):
-    """Open a new Windows Terminal tab running start_monitor.bat."""
-    print("--- Upload successful, launching RTT monitor in new terminal tab ---")
-    bat_path = os.path.join(env.subst("$PROJECT_DIR"), "start_monitor.bat")
-    subprocess.Popen(
-        ["wt", "--window", "0", "new-tab", "--title", "RTT Monitor", "cmd", "/k", bat_path],
-        shell=False
-    )
-
+import sys
+import subprocess
+from pathlib import Path
 
 Import("env")
 
-env.AddPreAction("upload", kill_openocd)
-env.AddPostAction("upload", start_monitor_after_upload)
+def find_openocd():
+    platformio_home = Path.home() / ".platformio"
+    
+    if sys.platform.startswith("win"):
+        openocd = platformio_home / "packages" / "tool-openocd" / "bin" / "openocd.exe"
+    else:
+        openocd = platformio_home / "packages" / "tool-openocd" / "bin" / "openocd"
+
+    if openocd.exists():
+        return str(openocd)
+
+    # fallback: try system PATH
+    return "openocd"
+
+def upload_firmware(source, target, env):
+    openocd = find_openocd()
+
+    project_dir = Path(env.subst("$PROJECT_DIR"))
+    build_dir = Path(env.subst("$BUILD_DIR"))
+
+    firmware_bin = build_dir / "firmware.bin"
+    signature_bin = build_dir / "firmware_signature.bin"
+
+    platformio_home = Path.home() / ".platformio"
+    scripts_dir = platformio_home / "packages" / "tool-openocd" / "openocd" / "scripts"
+
+    if not firmware_bin.exists():
+        raise Exception(f"Firmware file not found: {firmware_bin}")
+
+    if not signature_bin.exists():
+        raise Exception(f"Signature file not found: {signature_bin}")
+
+    cmd = [
+        openocd,
+        "-s", str(scripts_dir),
+        "-f", "interface/cmsis-dap.cfg",
+        "-f", "target/nrf52.cfg",
+        "-c", f"program {{{firmware_bin}}} 0x26000 verify",
+        "-c", f"program {{{signature_bin}}} 0x7F000 verify reset",
+        "-c", "shutdown",
+    ]
+
+    print("Uploading firmware using OpenOCD...")
+    print(" ".join(cmd))
+
+    result = subprocess.run(cmd)
+
+    if result.returncode != 0:
+        raise Exception("Upload failed")
+
+env.Replace(UPLOADCMD=upload_firmware)
