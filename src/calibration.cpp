@@ -100,9 +100,8 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     // Log exact formats
     rtt.println("CALIBRATION: DONE");
 
-    // If empty profile database, auto-initialize as Default Vertical
-    if (getProfileCount() == 0) {
-        addOrUpdateProfile0(avgX, avgY, avgZ);
+    if (!addNextCalibrationProfile()) {
+        rtt.println("CALIBRATION: PROFILE SAVE FAILED");
     }
 
     goToTrainingMode();
@@ -149,12 +148,14 @@ void handleCalibration() {
 
     const unsigned long elapsed = currentMillis - stabilityStartTime;
 
+#if ALIGN_RTT_CALIB_VERBOSE
     static unsigned long lastDebugPrintMs = 0;
     if (currentMillis - lastDebugPrintMs >= 1000UL) {
         lastDebugPrintMs = currentMillis;
         rtt.printf("DEBUG: calibState=%d, elapsed=%lu, totalSamples=%d, sampleCount=%d, dtSample=%lu\n",
                    (int)calibState, elapsed, totalSamples, sampleCount, currentMillis - s_lastSampleTime);
     }
+#endif
 
     if (elapsed > kSafetyTimeoutMs) {
         calibrationFail("Timeout");
@@ -186,9 +187,10 @@ void handleCalibration() {
                 samplesZ[totalSamples] = rawZ;
                 totalSamples++;
 
-                // Print every sample values immediately
+#if ALIGN_RTT_CALIB_VERBOSE
                 rtt.printf("CALIB: Sample #%d - raw[%s, %s, %s]\n",
                            totalSamples, String(rawX, 2).c_str(), String(rawY, 2).c_str(), String(rawZ, 2).c_str());
+#endif
             }
         }
 
@@ -223,10 +225,11 @@ void handleCalibration() {
             float stdDevY = sqrtf(varY / (float)totalSamples);
             float stdDevZ = sqrtf(varZ / (float)totalSamples);
 
-            // Log statistics
+#if ALIGN_RTT_CALIB_VERBOSE
             rtt.printf("CALIB STATS: Mean[%s, %s, %s], StdDev[%s, %s, %s]\n",
                        String(meanX, 2).c_str(), String(meanY, 2).c_str(), String(meanZ, 2).c_str(),
                        String(stdDevX, 2).c_str(), String(stdDevY, 2).c_str(), String(stdDevZ, 2).c_str());
+#endif
 
             // Safety limit: if standard deviation is too high, posture is too unstable
             if (stdDevX > 1.0f || stdDevY > 1.0f || stdDevZ > 1.0f) {
@@ -250,12 +253,16 @@ void handleCalibration() {
                     finalSumZ += samplesZ[i];
                     validCount++;
                 } else {
+#if ALIGN_RTT_CALIB_VERBOSE
                     rtt.printf("CALIB: Outlier Sample #%d rejected - raw[%s, %s, %s]\n",
                                i + 1, String(samplesX[i], 2).c_str(), String(samplesY[i], 2).c_str(), String(samplesZ[i], 2).c_str());
+#endif
                 }
             }
 
+#if ALIGN_RTT_CALIB_VERBOSE
             rtt.printf("CALIB RESULTS: Valid samples=%d/%d\n", validCount, totalSamples);
+#endif
 
             if (validCount < MIN_VALID_SAMPLES) {
                 calibrationFail("Too much movement");

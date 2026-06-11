@@ -9,6 +9,15 @@
 
 extern RTTStream rtt;
 
+#if __has_include(<InternalFileSystem.h>)
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
+using namespace Adafruit_LittleFS_Namespace;
+#define PROFILE_STORE_HAS_FS 1
+#else
+#define PROFILE_STORE_HAS_FS 0
+#endif
+
 // ── Flash layout ───────────────────────────────────────────────────────────
 // nRF52832 has 512 KB flash in 4 KB (0x1000) pages. We reserve the last
 // page (0x7F000-0x7FFFF) as a dedicated settings page. Linker scripts for
@@ -56,6 +65,86 @@ static PersistedSettings g_settings = {
     {0, 0, 0},
     {}
 };
+
+static constexpr uint8_t ACTIVE_PROFILE_DEFAULT = 0u;
+static constexpr uint8_t ACTIVE_PROFILE_MAX_STORED = 8u;
+static constexpr uint32_t PROFILE_STORE_MAGIC = 0x50524631UL; // "PRF1"
+static const char* PROFILE_STORE_PATH = "/profiles.dat";
+static const char* PROFILE_STORE_TMP_PATH = "/profiles.tmp";
+
+struct ProfileStore {
+    uint32_t magic;
+    uint8_t  profileCount;
+    int8_t   activeProfileIndex;
+    uint8_t  reserved[2];
+    OrientationProfile profiles[8];
+};
+
+static int8_t decodeStoredActiveProfileIndex() {
+    const uint8_t stored = g_settings.reserved2[0];
+    if (stored == ACTIVE_PROFILE_DEFAULT) return -1;
+    if (stored > ACTIVE_PROFILE_MAX_STORED) return -1;
+
+    const int8_t index = (int8_t)(stored - 1u);
+    if (index >= (int8_t)g_settings.profileCount) return -1;
+    return index;
+}
+
+#if PROFILE_STORE_HAS_FS
+static bool writeProfileStore() {
+    InternalFS.begin();
+    InternalFS.remove(PROFILE_STORE_TMP_PATH);
+
+    File tmp = InternalFS.open(PROFILE_STORE_TMP_PATH, FILE_O_WRITE);
+    if (!tmp) return false;
+
+    ProfileStore store{};
+    store.magic = PROFILE_STORE_MAGIC;
+    store.profileCount = g_settings.profileCount;
+    store.activeProfileIndex = decodeStoredActiveProfileIndex();
+    memcpy(store.profiles, g_settings.profiles, sizeof(store.profiles));
+
+    const size_t written = tmp.write((uint8_t*)&store, sizeof(store));
+    tmp.flush();
+    tmp.close();
+
+    if (written != sizeof(store)) {
+        InternalFS.remove(PROFILE_STORE_TMP_PATH);
+        return false;
+    }
+
+    InternalFS.remove(PROFILE_STORE_PATH);
+    if (InternalFS.rename(PROFILE_STORE_TMP_PATH, PROFILE_STORE_PATH)) {
+        return true;
+    }
+
+    File direct = InternalFS.open(PROFILE_STORE_PATH, FILE_O_WRITE);
+    if (!direct) {
+        InternalFS.remove(PROFILE_STORE_TMP_PATH);
+        return false;
+    }
+
+    const size_t written2 = direct.write((uint8_t*)&store, sizeof(store));
+    direct.flush();
+    direct.close();
+    InternalFS.remove(PROFILE_STORE_TMP_PATH);
+    return written2 == sizeof(store);
+}
+
+static bool readProfileStore(ProfileStore& store) {
+    InternalFS.begin();
+    File file = InternalFS.open(PROFILE_STORE_PATH, FILE_O_READ);
+    if (!file) return false;
+
+    const int readBytes = file.read((uint8_t*)&store, sizeof(store));
+    file.close();
+
+    if (readBytes != (int)sizeof(store)) return false;
+    if (store.magic != PROFILE_STORE_MAGIC) return false;
+    if (store.profileCount > 8) store.profileCount = 8;
+    return true;
+}
+#endif
 
 // ── NVMC helpers ───────────────────────────────────────────────────────────
 static inline void nvmcWaitReady() {
@@ -230,6 +319,23 @@ void storageSaveCalibration(float y, float z) {
 
 bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
     if (!profiles || !count) return false;
+
+#if PROFILE_STORE_HAS_FS
+    ProfileStore store{};
+    if (readProfileStore(store)) {
+        g_settings.profileCount = store.profileCount;
+        memcpy(g_settings.profiles, store.profiles, store.profileCount * sizeof(OrientationProfile));
+        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+        if (store.activeProfileIndex >= 0 && store.activeProfileIndex < (int8_t)store.profileCount) {
+            g_settings.reserved2[0] = (uint8_t)(store.activeProfileIndex + 1);
+        }
+
+        *count = g_settings.profileCount;
+        memcpy(profiles, g_settings.profiles, g_settings.profileCount * sizeof(OrientationProfile));
+        return true;
+    }
+#endif
+
     *count = g_settings.profileCount;
     if (g_settings.profileCount > 8) {
         g_settings.profileCount = 8;
@@ -251,6 +357,29 @@ void storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
         g_settings.calY = g_settings.profiles[0].refY;
         g_settings.calZ = g_settings.profiles[0].refZ;
     }
+
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return;
+#endif
+
+    persist();
+}
+
+int8_t storageLoadActiveProfileIndex() {
+    return decodeStoredActiveProfileIndex();
+}
+
+void storageSaveActiveProfileIndex(int8_t index) {
+    uint8_t stored = ACTIVE_PROFILE_DEFAULT;
+    if (index >= 0 && index < (int8_t)g_settings.profileCount && index < (int8_t)ACTIVE_PROFILE_MAX_STORED) {
+        stored = (uint8_t)(index + 1);
+    }
+    if (g_settings.reserved2[0] == stored) return;
+
+    g_settings.reserved2[0] = stored;
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return;
+#endif
     persist();
 }
 
