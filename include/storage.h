@@ -17,6 +17,8 @@ bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count);
 void storageSaveProfiles(const OrientationProfile* profiles, uint8_t count);
 int8_t storageLoadActiveProfileIndex();
 void storageSaveActiveProfileIndex(int8_t index);
+uint8_t storageLoadNextProfileOverwriteIndex();
+void storageSaveNextProfileOverwriteIndex(uint8_t index);
 
 bool storageLoadCalibration(float* y, float* z);
 void storageSaveCalibration(float y, float z);

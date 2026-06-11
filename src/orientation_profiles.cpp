@@ -11,6 +11,7 @@ extern RTTStream rtt;
 static OrientationProfile s_profiles[8];
 static uint8_t s_profileCount = 0;
 static int s_activeProfileIndex = -1;
+static uint8_t s_nextOverwriteIndex = 0;
 
 constexpr uint8_t MAX_PROFILE_COUNT = 8;
 constexpr float PROFILE_MATCH_THRESHOLD = 0.95f;  // Strict check (~18 deg max tilt)
@@ -73,10 +74,15 @@ void initProfiles() {
     memset(s_profiles, 0, sizeof(s_profiles));
     s_profileCount = 0;
     s_activeProfileIndex = -1;
+    s_nextOverwriteIndex = 0;
 
     if (!storageLoadProfiles(s_profiles, &s_profileCount)) {
         s_profileCount = 0;
         s_activeProfileIndex = -1;
+    }
+    s_nextOverwriteIndex = storageLoadNextProfileOverwriteIndex();
+    if (s_nextOverwriteIndex >= MAX_PROFILE_COUNT) {
+        s_nextOverwriteIndex = 0;
     }
 
     const int8_t storedActiveIndex = storageLoadActiveProfileIndex();
@@ -94,16 +100,26 @@ bool addCalibrationProfile(const char* name) {
     if (!name || strlen(name) == 0) return false;
     if (!isLastCalibrationValid()) return false;
 
+    bool replacingExisting = false;
+    bool overwritingOldest = false;
+
     // Check if name already exists (if so, overwrite)
     int targetIndex = s_profileCount;
     for (uint8_t i = 0; i < s_profileCount; i++) {
         if (strcmp(s_profiles[i].name, name) == 0) {
             targetIndex = i;
+            replacingExisting = true;
             break;
         }
     }
 
-    if (targetIndex == s_profileCount && s_profileCount >= MAX_PROFILE_COUNT) return false;
+    if (targetIndex == s_profileCount && s_profileCount >= MAX_PROFILE_COUNT) {
+        targetIndex = s_nextOverwriteIndex;
+        if (targetIndex >= MAX_PROFILE_COUNT) targetIndex = 0;
+        overwritingOldest = true;
+    } else if (replacingExisting && s_profileCount >= MAX_PROFILE_COUNT && targetIndex == s_nextOverwriteIndex) {
+        overwritingOldest = true;
+    }
 
     OrientationProfile& p = s_profiles[targetIndex];
     copyProfileName(p.name, name);
@@ -119,16 +135,29 @@ bool addCalibrationProfile(const char* name) {
     s_activeProfileIndex = targetIndex;
     setPostureOrigin3D(p.refX, p.refY, p.refZ);
     setOrientationLabel(p.name);
-    rtt.printf("PROFILE CREATED: %s\n", p.name);
+    if (overwritingOldest) {
+        s_nextOverwriteIndex = (uint8_t)((targetIndex + 1) % MAX_PROFILE_COUNT);
+        rtt.printf("PROFILE OVERWRITTEN: %s (next oldest: Profile %u)\n",
+                   p.name,
+                   (unsigned)(s_nextOverwriteIndex + 1));
+    } else {
+        if (!replacingExisting && s_profileCount >= MAX_PROFILE_COUNT) {
+            s_nextOverwriteIndex = 0;
+        }
+        rtt.printf("PROFILE CREATED: %s\n", p.name);
+    }
     storageSaveProfiles(s_profiles, s_profileCount);
     storageSaveActiveProfileIndex((int8_t)s_activeProfileIndex);
+    storageSaveNextProfileOverwriteIndex(s_nextOverwriteIndex);
 
     return true;
 }
 
 bool addNextCalibrationProfile() {
     char name[16];
-    if (!findNextProfileName(name, sizeof(name))) return false;
+    if (!findNextProfileName(name, sizeof(name))) {
+        snprintf(name, sizeof(name), "Profile %u", (unsigned)(s_nextOverwriteIndex + 1));
+    }
     return addCalibrationProfile(name);
 }
 
@@ -147,6 +176,10 @@ bool deleteCalibrationProfile(uint8_t index) {
         s_activeProfileIndex--;
         storageSaveActiveProfileIndex((int8_t)s_activeProfileIndex);
     }
+    if (s_profileCount < MAX_PROFILE_COUNT) {
+        s_nextOverwriteIndex = 0;
+        storageSaveNextProfileOverwriteIndex(s_nextOverwriteIndex);
+    }
     return true;
 }
 
@@ -154,10 +187,12 @@ void clearCalibrationProfiles() {
     memset(s_profiles, 0, sizeof(s_profiles));
     s_profileCount = 0;
     s_activeProfileIndex = -1;
+    s_nextOverwriteIndex = 0;
     setPostureOrigin(6.75f, 6.75f);
     setOrientationLabel("DEFAULT");
     storageSaveProfiles(s_profiles, s_profileCount);
     storageSaveActiveProfileIndex(-1);
+    storageSaveNextProfileOverwriteIndex(s_nextOverwriteIndex);
     rtt.println("PROFILES CLEARED");
 }
 

@@ -68,6 +68,7 @@ static PersistedSettings g_settings = {
 
 static constexpr uint8_t ACTIVE_PROFILE_DEFAULT = 0u;
 static constexpr uint8_t ACTIVE_PROFILE_MAX_STORED = 8u;
+static constexpr uint8_t NEXT_OVERWRITE_DEFAULT = 0u;
 static constexpr uint32_t PROFILE_STORE_MAGIC = 0x50524631UL; // "PRF1"
 static const char* PROFILE_STORE_PATH = "/profiles.dat";
 static const char* PROFILE_STORE_TMP_PATH = "/profiles.tmp";
@@ -90,6 +91,12 @@ static int8_t decodeStoredActiveProfileIndex() {
     return index;
 }
 
+static uint8_t decodeStoredNextOverwriteIndex() {
+    const uint8_t stored = g_settings.reserved2[1];
+    if (stored >= ACTIVE_PROFILE_MAX_STORED) return NEXT_OVERWRITE_DEFAULT;
+    return stored;
+}
+
 #if PROFILE_STORE_HAS_FS
 static bool writeProfileStore() {
     InternalFS.begin();
@@ -102,6 +109,7 @@ static bool writeProfileStore() {
     store.magic = PROFILE_STORE_MAGIC;
     store.profileCount = g_settings.profileCount;
     store.activeProfileIndex = decodeStoredActiveProfileIndex();
+    store.reserved[0] = decodeStoredNextOverwriteIndex();
     memcpy(store.profiles, g_settings.profiles, sizeof(store.profiles));
 
     const size_t written = tmp.write((uint8_t*)&store, sizeof(store));
@@ -329,6 +337,7 @@ bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
         if (store.activeProfileIndex >= 0 && store.activeProfileIndex < (int8_t)store.profileCount) {
             g_settings.reserved2[0] = (uint8_t)(store.activeProfileIndex + 1);
         }
+        g_settings.reserved2[1] = (store.reserved[0] < ACTIVE_PROFILE_MAX_STORED) ? store.reserved[0] : NEXT_OVERWRITE_DEFAULT;
 
         *count = g_settings.profileCount;
         memcpy(profiles, g_settings.profiles, g_settings.profileCount * sizeof(OrientationProfile));
@@ -377,6 +386,21 @@ void storageSaveActiveProfileIndex(int8_t index) {
     if (g_settings.reserved2[0] == stored) return;
 
     g_settings.reserved2[0] = stored;
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return;
+#endif
+    persist();
+}
+
+uint8_t storageLoadNextProfileOverwriteIndex() {
+    return decodeStoredNextOverwriteIndex();
+}
+
+void storageSaveNextProfileOverwriteIndex(uint8_t index) {
+    if (index >= ACTIVE_PROFILE_MAX_STORED) index = NEXT_OVERWRITE_DEFAULT;
+    if (g_settings.reserved2[1] == index) return;
+
+    g_settings.reserved2[1] = index;
 #if PROFILE_STORE_HAS_FS
     if (writeProfileStore()) return;
 #endif
