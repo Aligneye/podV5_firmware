@@ -11,7 +11,9 @@ extern RTTStream rtt;
 static OrientationProfile s_profiles[8];
 static uint8_t s_profileCount = 0;
 static int s_activeProfileIndex = -1;
+static uint8_t s_nextOverwriteIndex = 0;
 
+constexpr uint8_t MAX_PROFILE_COUNT = 8;
 constexpr float PROFILE_MATCH_THRESHOLD = 0.95f;  // Strict check (~18 deg max tilt)
 constexpr float PROFILE_AMBIGUITY_MARGIN = 0.05f; // Margin to prevent close matching
 
@@ -37,30 +39,86 @@ static inline bool normalize3D(float x, float y, float z, float& nx, float& ny, 
     return true;
 }
 
+static bool profileNameExists(const char* name) {
+    for (uint8_t i = 0; i < s_profileCount; i++) {
+        if (strcmp(s_profiles[i].name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool findNextProfileName(char* outName, size_t outLen) {
+    if (!outName || outLen == 0) return false;
+
+    for (uint8_t n = 1; n <= MAX_PROFILE_COUNT; n++) {
+        char candidate[16];
+        snprintf(candidate, sizeof(candidate), "Profile %u", n);
+        if (!profileNameExists(candidate)) {
+            strncpy(outName, candidate, outLen - 1);
+            outName[outLen - 1] = '\0';
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void setOrientationLabel(const char* label) {
+    strncpy(orientationText, label, sizeof(orientationText) - 1);
+    orientationText[sizeof(orientationText) - 1] = '\0';
+}
+
 // ── Profile APIs ────────────────────────────────────────────────────────────
 void initProfiles() {
     memset(s_profiles, 0, sizeof(s_profiles));
     s_profileCount = 0;
     s_activeProfileIndex = -1;
+    s_nextOverwriteIndex = 0;
 
     if (!storageLoadProfiles(s_profiles, &s_profileCount)) {
         s_profileCount = 0;
         s_activeProfileIndex = -1;
+    }
+    s_nextOverwriteIndex = storageLoadNextProfileOverwriteIndex();
+    if (s_nextOverwriteIndex >= MAX_PROFILE_COUNT) {
+        s_nextOverwriteIndex = 0;
+    }
+
+    const int8_t storedActiveIndex = storageLoadActiveProfileIndex();
+    if (storedActiveIndex >= 0 && storedActiveIndex < (int8_t)s_profileCount) {
+        s_activeProfileIndex = storedActiveIndex;
+        setPostureOrigin3D(s_profiles[s_activeProfileIndex].refX,
+                           s_profiles[s_activeProfileIndex].refY,
+                           s_profiles[s_activeProfileIndex].refZ);
+        setOrientationLabel(s_profiles[s_activeProfileIndex].name);
+        rtt.printf("PROFILE RESTORED: %s\n", s_profiles[s_activeProfileIndex].name);
     }
 }
 
 bool addCalibrationProfile(const char* name) {
     if (!name || strlen(name) == 0) return false;
     if (!isLastCalibrationValid()) return false;
-    if (s_profileCount >= 8) return false;
+
+    bool replacingExisting = false;
+    bool overwritingOldest = false;
 
     // Check if name already exists (if so, overwrite)
     int targetIndex = s_profileCount;
     for (uint8_t i = 0; i < s_profileCount; i++) {
         if (strcmp(s_profiles[i].name, name) == 0) {
             targetIndex = i;
+            replacingExisting = true;
             break;
         }
+    }
+
+    if (targetIndex == s_profileCount && s_profileCount >= MAX_PROFILE_COUNT) {
+        targetIndex = s_nextOverwriteIndex;
+        if (targetIndex >= MAX_PROFILE_COUNT) targetIndex = 0;
+        overwritingOldest = true;
+    } else if (replacingExisting && s_profileCount >= MAX_PROFILE_COUNT && targetIndex == s_nextOverwriteIndex) {
+        overwritingOldest = true;
     }
 
     OrientationProfile& p = s_profiles[targetIndex];
@@ -74,11 +132,33 @@ bool addCalibrationProfile(const char* name) {
         s_profileCount++;
     }
 
+    s_activeProfileIndex = targetIndex;
+    setPostureOrigin3D(p.refX, p.refY, p.refZ);
+    setOrientationLabel(p.name);
+    if (overwritingOldest) {
+        s_nextOverwriteIndex = (uint8_t)((targetIndex + 1) % MAX_PROFILE_COUNT);
+        rtt.printf("PROFILE OVERWRITTEN: %s (next oldest: Profile %u)\n",
+                   p.name,
+                   (unsigned)(s_nextOverwriteIndex + 1));
+    } else {
+        if (!replacingExisting && s_profileCount >= MAX_PROFILE_COUNT) {
+            s_nextOverwriteIndex = 0;
+        }
+        rtt.printf("PROFILE CREATED: %s\n", p.name);
+    }
     storageSaveProfiles(s_profiles, s_profileCount);
-    rtt.printf("PROFILE CREATED: %s\n", p.name);
+    storageSaveActiveProfileIndex((int8_t)s_activeProfileIndex);
+    storageSaveNextProfileOverwriteIndex(s_nextOverwriteIndex);
 
-    detectCurrentOrientationProfile();
     return true;
+}
+
+bool addNextCalibrationProfile() {
+    char name[16];
+    if (!findNextProfileName(name, sizeof(name))) {
+        snprintf(name, sizeof(name), "Profile %u", (unsigned)(s_nextOverwriteIndex + 1));
+    }
+    return addCalibrationProfile(name);
 }
 
 bool deleteCalibrationProfile(uint8_t index) {
@@ -90,8 +170,30 @@ bool deleteCalibrationProfile(uint8_t index) {
     s_profileCount--;
     storageSaveProfiles(s_profiles, s_profileCount);
 
-    detectCurrentOrientationProfile();
+    if (s_activeProfileIndex == index) {
+        selectDefaultCalibrationProfile();
+    } else if (s_activeProfileIndex > index) {
+        s_activeProfileIndex--;
+        storageSaveActiveProfileIndex((int8_t)s_activeProfileIndex);
+    }
+    if (s_profileCount < MAX_PROFILE_COUNT) {
+        s_nextOverwriteIndex = 0;
+        storageSaveNextProfileOverwriteIndex(s_nextOverwriteIndex);
+    }
     return true;
+}
+
+void clearCalibrationProfiles() {
+    memset(s_profiles, 0, sizeof(s_profiles));
+    s_profileCount = 0;
+    s_activeProfileIndex = -1;
+    s_nextOverwriteIndex = 0;
+    setPostureOrigin(6.75f, 6.75f);
+    setOrientationLabel("DEFAULT");
+    storageSaveProfiles(s_profiles, s_profileCount);
+    storageSaveActiveProfileIndex(-1);
+    storageSaveNextProfileOverwriteIndex(s_nextOverwriteIndex);
+    rtt.println("PROFILES CLEARED");
 }
 
 uint8_t getProfileCount() {
@@ -114,6 +216,25 @@ const OrientationProfile* getActiveProfile() {
         return &s_profiles[s_activeProfileIndex];
     }
     return nullptr;
+}
+
+bool selectCalibrationProfile(uint8_t index) {
+    if (index >= s_profileCount) return false;
+
+    s_activeProfileIndex = index;
+    storageSaveActiveProfileIndex((int8_t)s_activeProfileIndex);
+    setPostureOrigin3D(s_profiles[index].refX, s_profiles[index].refY, s_profiles[index].refZ);
+    setOrientationLabel(s_profiles[index].name);
+    rtt.printf("PROFILE SELECTED: %s\n", s_profiles[index].name);
+    return true;
+}
+
+void selectDefaultCalibrationProfile() {
+    s_activeProfileIndex = -1;
+    storageSaveActiveProfileIndex(-1);
+    setPostureOrigin(6.75f, 6.75f);
+    setOrientationLabel("DEFAULT");
+    rtt.println("PROFILE SELECTED: DEFAULT");
 }
 
 bool detectCurrentOrientationProfile() {
@@ -210,6 +331,8 @@ void addOrUpdateProfile0(float refX, float refY, float refZ) {
         s_profiles[0].createdAt = millis();
         storageSaveProfiles(s_profiles, s_profileCount);
         s_activeProfileIndex = 0;
+        storageSaveActiveProfileIndex((int8_t)s_activeProfileIndex);
+        setOrientationLabel(s_profiles[0].name);
         rtt.println("PROFILE CREATED: Default Vertical");
     } else {
         s_profiles[0].refX = refX;

@@ -141,6 +141,9 @@ static void applyAction(const String &valueRaw) {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
         rtt.println("BLE CMD: ACTION=CALIBRATE_CANCEL");
+    } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
+        clearCalibrationProfiles();
+        rtt.println("BLE CMD: ACTION=PROFILE_CLEAR");
     }
 }
 
@@ -182,6 +185,50 @@ static void applyDifficultyDegrees(const String &valueRaw) {
     }
 }
 
+static void applyProfileSelection(const String &valueRaw) {
+    String value = valueRaw;
+    value.trim();
+    if (value.length() == 0) return;
+
+    String upper = value;
+    upper.toUpperCase();
+    if (upper == "CLEAR" || upper == "RESET") {
+        clearCalibrationProfiles();
+        rtt.println("BLE CMD: PROFILE=CLEAR");
+        return;
+    }
+
+    if (upper == "DEFAULT") {
+        selectDefaultCalibrationProfile();
+        rtt.println("BLE CMD: PROFILE=DEFAULT");
+        return;
+    }
+
+    int requestedIndex = value.toInt();
+    if (requestedIndex > 0) {
+        if (selectCalibrationProfile((uint8_t)(requestedIndex - 1))) {
+            rtt.printf("BLE CMD: PROFILE_INDEX=%d\n", requestedIndex);
+        } else {
+            rtt.printf("BLE CMD: PROFILE_INDEX=%d ignored\n", requestedIndex);
+        }
+        return;
+    }
+
+    for (uint8_t i = 0; i < getProfileCount(); i++) {
+        const OrientationProfile *profile = getProfile(i);
+        if (!profile) continue;
+        String profileName = String(profile->name);
+        profileName.toUpperCase();
+        if (upper == profileName) {
+            selectCalibrationProfile(i);
+            rtt.printf("BLE CMD: PROFILE=%s\n", profile->name);
+            return;
+        }
+    }
+
+    rtt.printf("BLE CMD: PROFILE=%s ignored\n", value.c_str());
+}
+
 static void parseAndApplyBleCommand(const String &payloadRaw) {
     String payload = payloadRaw;
     payload.trim();
@@ -217,6 +264,8 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 applyTherapyIntensity(value);
             } else if (key == "DIFFICULTY_DEG") {
                 applyDifficultyDegrees(value);
+            } else if (key == "PROFILE" || key == "PROFILE_INDEX" || key == "PROFILES") {
+                applyProfileSelection(value);
             } else if (key == "CALIBRATE" || key == "CALIBRATION") {
                 applyCalibrationControl(value);
             } else if (key == "ACTION") {
@@ -247,8 +296,10 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
         payload += (char)data[i];
     }
 
+#if ALIGN_RTT_BLE_RX_LOG
     rtt.print("BLE RX CMD: ");
     rtt.println(payload);
+#endif
     parseAndApplyBleCommand(payload);
 }
 
@@ -320,6 +371,20 @@ void bluetoothLoop() {
     unsigned long calibElapsedMs = getCalibrationElapsedMs();
     unsigned long calibTotalMs = getCalibrationTotalMs();
     const char *calibResult = getCalibrationResult();
+    const OrientationProfile *activeProfile = getActiveProfile();
+    const int activeProfileIndex = getActiveProfileIndex();
+    const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
+    const int profileIndexForApp = activeProfile ? (activeProfileIndex + 1) : 0;
+    char profileList[160] = "";
+    int profileListOffset = 0;
+    for (uint8_t i = 0; i < getProfileCount() && profileListOffset < (int)sizeof(profileList); i++) {
+        const OrientationProfile *profile = getProfile(i);
+        if (!profile) continue;
+        profileListOffset += snprintf(profileList + profileListOffset,
+                                      sizeof(profileList) - profileListOffset,
+                                      (i == 0) ? "%s" : "|%s",
+                                      profile->name);
+    }
 
     const char *modeString = "TRACKING";
     if (currentMode == MODE_TRAINING) {
@@ -362,7 +427,12 @@ void bluetoothLoop() {
 
     if (offset < sizeof(jsonBuffer)) {
         offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-            ",\"difficulty_deg\":%d", (int)kBadPostureDeg
+            ",\"difficulty_deg\":%d,\"profile\":\"%s\",\"profile_index\":%d,\"profile_count\":%u,\"profiles\":\"%s\"",
+            (int)kBadPostureDeg,
+            profileName,
+            profileIndexForApp,
+            (unsigned)getProfileCount(),
+            profileList
         );
     }
 
@@ -418,10 +488,28 @@ void bluetoothLoop() {
         pCharacteristic->notify(jsonBuffer);
     }
 
-    // Also write JSON to RTT (suppressed during active calibration to avoid spamming logs)
+    // Clean human-readable RTT status for day-to-day debugging.
+#if ALIGN_RTT_STATUS_LOG
+    static unsigned long lastStatusMs = 0;
+    if (!isCalibrating() && (now - lastStatusMs) >= ALIGN_RTT_STATUS_INTERVAL_MS) {
+        lastStatusMs = now;
+        rtt.printf("STATUS mode=%s profile=%s profiles=%u angle=%s deg dir=%s posture=%s bad=%s steps=%lu\n",
+                   modeString,
+                   profileName,
+                   (unsigned)getProfileCount(),
+                   String(currentAngle, 1).c_str(),
+                   directionText,
+                   postureText,
+                   isBadPosture ? "Y" : "N",
+                   (unsigned long)getDeviceStepCount());
+    }
+#endif
+
+#if ALIGN_RTT_JSON_LOG
     if (!isCalibrating()) {
         rtt.println(jsonBuffer);
     }
+#endif
 }
 
 void bluetoothStartAdvertising() {

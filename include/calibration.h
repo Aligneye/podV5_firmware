@@ -15,13 +15,17 @@ struct OrientationProfile {
 
 // ── Profile Storage APIs ────────────────────────────────────────────────────
 bool addCalibrationProfile(const char* name);
+bool addNextCalibrationProfile();
 bool deleteCalibrationProfile(uint8_t index);
+void clearCalibrationProfiles();
 uint8_t getProfileCount();
 const OrientationProfile* getProfile(uint8_t index);
 
 // ── Active Profile APIs ─────────────────────────────────────────────────────
 int getActiveProfileIndex();
 const OrientationProfile* getActiveProfile();
+bool selectCalibrationProfile(uint8_t index);
+void selectDefaultCalibrationProfile();
 bool detectCurrentOrientationProfile();
 
 // ── Helper / Update API for training ───────────────────────────────────────
