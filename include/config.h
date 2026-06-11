@@ -53,6 +53,39 @@
 #define BLE_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define BLE_DEVICE_NAME         "align pod"
 
+// ── RTT logging ─────────────────────────────────────────────────────────────
+#ifndef ALIGN_RTT_JSON_LOG
+#define ALIGN_RTT_JSON_LOG       0
+#endif
+
+#ifndef ALIGN_RTT_BLE_RX_LOG
+#define ALIGN_RTT_BLE_RX_LOG     0
+#endif
+
+#ifndef ALIGN_RTT_STATUS_LOG
+#define ALIGN_RTT_STATUS_LOG     1
+#endif
+
+#ifndef ALIGN_RTT_STATUS_INTERVAL_MS
+#define ALIGN_RTT_STATUS_INTERVAL_MS 1000UL
+#endif
+
+#ifndef ALIGN_RTT_SENSOR_LOG
+#define ALIGN_RTT_SENSOR_LOG     0
+#endif
+
+#ifndef ALIGN_RTT_CALIB_VERBOSE
+#define ALIGN_RTT_CALIB_VERBOSE  0
+#endif
+
+#ifndef ALIGN_RTT_THERAPY_VERBOSE
+#define ALIGN_RTT_THERAPY_VERBOSE 0
+#endif
+
+#ifndef ALIGN_RTT_SESSION_VERBOSE
+#define ALIGN_RTT_SESSION_VERBOSE 0
+#endif
+
 // ── Therapy patterns (10 total) ───────────────────────────
 enum TherapyPattern {
     PATTERN_MUSCLE_ACTIVATION = 0,  // always first

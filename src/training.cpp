@@ -163,10 +163,15 @@ static bool trainingIngestAccelSample(void) {
   const uint32_t stepBefore = stepCountGetTotal();
   stepCountProcessSample(rawX, rawY, rawZ, now);
   const uint32_t stepAfter = stepCountGetTotal();
+#if ALIGN_RTT_SENSOR_LOG
   if (!isCalibrating() && stepAfter > stepBefore) {
     rtt.print("[Step Trigger] count=");
     rtt.println((unsigned long)stepAfter);
   }
+#else
+  (void)stepBefore;
+  (void)stepAfter;
+#endif
 
   if (!s_lpfSeeded) {
     g_fx = rawX;
@@ -197,7 +202,9 @@ void trainingGetFilteredAccel(float *outY, float *outZ) {
 // Session stats (training mode)
 static Mode s_lastModeForSession = MODE_OFF;
 
+#if ALIGN_RTT_SENSOR_LOG
 static unsigned long s_lastSensorRttMs = 0;
+#endif
 static unsigned long s_badMotorStartMs = 0;
 static unsigned long s_vibToggleMs = 0;
 static bool s_vibOn = false;
@@ -209,7 +216,6 @@ static unsigned long s_trainingStartMs = 0;
 static void loadStoredCalibration() {
   float loadedY = kDefaultOriginY;
   float loadedZ = kDefaultOriginZ;
-  storageLoadCalibration(&loadedY, &loadedZ);
   if (fabsf(loadedY) < kNearZero && fabsf(loadedZ) < kNearZero) {
     loadedY = kDefaultOriginY;
     loadedZ = kDefaultOriginZ;
@@ -275,7 +281,7 @@ static float computePostureAngle(float X, float Y, float Z) {
     strncpy(orientationText, active->name, sizeof(orientationText) - 1);
     orientationText[sizeof(orientationText) - 1] = '\0';
   } else {
-    strncpy(orientationText, "UNKNOWN", sizeof(orientationText) - 1);
+    strncpy(orientationText, "DEFAULT", sizeof(orientationText) - 1);
     orientationText[sizeof(orientationText) - 1] = '\0';
   }
 
@@ -450,6 +456,7 @@ bool updatePostureAngle() {
 }
 
 static void logTrainingSensorRtt(uint32_t now) {
+#if ALIGN_RTT_SENSOR_LOG
   if (now - s_lastSensorRttMs < 1000UL)
     return;
   s_lastSensorRttMs = now;
@@ -480,6 +487,9 @@ static void logTrainingSensorRtt(uint32_t now) {
   rtt.print(trainingSubModes[static_cast<uint8_t>(trainingSubModeIndex)]);
   rtt.print(" | steps=");
   rtt.println((unsigned long)stepCountGetTotal());
+#else
+  (void)now;
+#endif
 }
 
 /**
@@ -492,15 +502,6 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   if (calibrationMotorActive()) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
-    return;
-  }
-
-  // If orientation is unknown (no active profile), do not trigger alerts / vibration
-  if (getActiveProfile() == nullptr) {
-    motorSetDuty(0);
-    s_badMotorStartMs = 0;
-    s_vibOn = false;
-    s_vibToggleMs = 0;
     return;
   }
 
@@ -666,11 +667,5 @@ void trainingLoop() {
     }
   }
 
-  // --- Boot profile detection stability guard ---
-  if (!s_bootProfileDetectionDone && sensorInitialized && sampleReady) {
-    if (isOrientationDetectionReady(now)) {
-      detectCurrentOrientationProfile();
-      s_bootProfileDetectionDone = true;
-    }
-  }
+  (void)sampleReady;
 }
