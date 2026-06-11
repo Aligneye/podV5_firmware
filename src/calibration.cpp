@@ -67,6 +67,7 @@ static void calibrationFail(const char* reason) {
     calibrationResultSetAt = millis();
     
     // Failure pulse: 500ms duration, 150 duty cycle
+    motorSetDuty(0);
     s_failVibEndMs = millis() + 500UL;
     motorOverrideDuty(150, 500);
 
@@ -88,10 +89,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibrationResultSetAt = millis();
     
-    // Success pulse: 125ms duration, 150 duty cycle
-    s_successPulseEndMs = millis() + 125UL;
-    motorOverrideDuty(150, 125);
-
     s_lastCalibratedX = avgX;
     s_lastCalibratedY = avgY;
     s_lastCalibratedZ = avgZ;
@@ -103,6 +100,11 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     if (!addNextCalibrationProfile()) {
         rtt.println("CALIBRATION: PROFILE SAVE FAILED");
     }
+
+    // Start this after profile storage so flash writes cannot stretch the pulse.
+    motorSetDuty(0);
+    s_successPulseEndMs = millis() + 125UL;
+    motorOverrideDuty(150, 125);
 
     goToTrainingMode();
 }
@@ -306,6 +308,7 @@ void startCalibration() {
     }
 
     // Start calibration with start haptic pulse (150 duty for 150ms)
+    motorSetDuty(0);
     motorOverrideDuty(150, 150);
 
     calibState         = CALIB_STATE_HOLD_STILL;
