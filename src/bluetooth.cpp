@@ -27,6 +27,25 @@ static uint8_t batteryPercentage = 0;
 static unsigned long lastBatteryReadMs = 0;
 static bool batteryReadValid = false;
 
+static constexpr uint8_t LED_ON = LOW;
+static constexpr uint8_t LED_OFF = HIGH;
+
+static void setRgbLed(bool red, bool green, bool blue) {
+    digitalWrite(PIN_LED_RED, red ? LED_ON : LED_OFF);
+    digitalWrite(PIN_LED_GREEN, green ? LED_ON : LED_OFF);
+    digitalWrite(PIN_LED_BLUE, blue ? LED_ON : LED_OFF);
+}
+
+static void updateBatteryLed(uint8_t percentage) {
+    if (percentage >= 67) {
+        setRgbLed(false, true, false);
+    } else if (percentage >= 34) {
+        setRgbLed(false, false, true);
+    } else {
+        setRgbLed(true, false, false);
+    }
+}
+
 static void updateBatteryReading(unsigned long now) {
     if (batteryReadValid && (now - lastBatteryReadMs) < 5000UL) {
         return;
@@ -38,6 +57,7 @@ static void updateBatteryReading(unsigned long now) {
     batteryMillivolts = reading.batteryMillivolts;
     batteryPercentage = reading.percentage;
     batteryVoltage = batteryMillivolts / 1000.0f;
+    updateBatteryLed(batteryPercentage);
     lastBatteryReadMs = now;
     batteryReadValid = true;
 }
@@ -330,7 +350,12 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
 void bluetoothSetup() {
     rtt.print("Initializing BLE as: ");
     rtt.println(BLE_DEVICE_NAME);
+    pinMode(PIN_LED_RED, OUTPUT);
+    pinMode(PIN_LED_GREEN, OUTPUT);
+    pinMode(PIN_LED_BLUE, OUTPUT);
+    setRgbLed(false, false, false);
     batteryMonitor.begin();
+    updateBatteryReading(millis());
 
     if (!bleInitialized) {
         Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);

@@ -10,8 +10,8 @@
 
 // ── RGB LED ───────────────────────────────────────────────
 #define PIN_LED_RED     13   // P0.13 → Arduino 13
-#define PIN_LED_GREEN   14   // P0.14 → Arduino 14
-#define PIN_LED_BLUE    15  // P0.15 → Arduino 15
+#define PIN_LED_BLUE    14   // P0.14 → Arduino 14
+#define PIN_LED_GREEN   15   // P0.15 → Arduino 15
 
 // ── Motor ─────────────────────────────────────────────────
 #define PIN_MOTOR       17   // P0.17 → Arduino 17
