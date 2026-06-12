@@ -24,7 +24,7 @@
 // P0.21 → hardware reset, not used in firmware
 
 // ── Battery ADC ───────────────────────────────────────────
-// No fixed pin assigned yet
+#define PIN_BATTERY_ADC A0   // BATPER → P0.02/AIN0
 
 // ── Button timing (ms) ────────────────────────────────────
 #define DEBOUNCE_MS         50
