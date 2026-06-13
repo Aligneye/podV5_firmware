@@ -29,6 +29,7 @@ Mode currentMode = MODE_TRAINING;
 TrainingAlertStyle trainingSubModeIndex = TrainingAlertStyle::Instant;
 uint8_t therapySubModeIndex = 0;
 unsigned long lastModeChangeMs = 0;
+unsigned long lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
 static bool offPrinted = true;
 static bool trainingStarted = true;
@@ -42,6 +43,11 @@ static void playButtonPressHaptic() {
   // Use a low duty cycle (80) to prevent brownout reset while providing haptic
   // feedback
   motorOverrideDuty(150, 125);
+}
+
+void markSubModeChanged() {
+  lastModeChangeMs = millis();
+  lastModeChangeDelayMs = SUBMODE_SWITCH_DELAY_MS;
 }
 
 void setDeviceMode(Mode newMode) {
@@ -65,6 +71,7 @@ void setDeviceMode(Mode newMode) {
   // 2. Transition to new mode
   currentMode = newMode;
   lastModeChangeMs = millis();
+  lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
   // 3. Reset state flags
   if (currentMode == MODE_OFF) {
@@ -101,6 +108,7 @@ static void handleDoubleClick() {
   switch (currentMode) {
   case MODE_TRAINING:
     trainingSubModeIndex = static_cast<TrainingAlertStyle>((static_cast<uint8_t>(trainingSubModeIndex) + 1) % TRAINING_SUBMODE_COUNT);
+    markSubModeChanged();
     DEBUG_PRINT("Training Sub-Mode: ");
     DEBUG_PRINTLN(trainingSubModes[static_cast<uint8_t>(trainingSubModeIndex)]);
     break;
@@ -109,10 +117,10 @@ static void handleDoubleClick() {
     // Stop session but stay in Therapy mode, then apply new duration
     therapyStop(false);
     therapySubModeIndex = (therapySubModeIndex + 1) % THERAPY_SUBMODE_COUNT;
+    markSubModeChanged();
 
     DEBUG_PRINT("Therapy Sub-Mode changed: ");
     DEBUG_PRINTLN(therapySubModes[therapySubModeIndex]);
-    therapyStart();
     break;
 
   default:
@@ -157,7 +165,7 @@ void buttonSetup() {
 void buttonLoop() {
   btn.tick();
 
-  bool isTransitioning = (millis() - lastModeChangeMs < 1000);
+  bool isTransitioning = (millis() - lastModeChangeMs < lastModeChangeDelayMs);
 
   if (!isTransitioning) {
     if (currentMode == MODE_OFF && !offPrinted) {

@@ -5,6 +5,7 @@
 #include "training.h"
 #include "device_time.h"
 #include "session_stats.h"
+#include "BatteryMonitor.h"
 #include <bluefruit.h>
 
 int therapyIntensityLevel = 2; // Default to Mid (2)
@@ -17,6 +18,49 @@ static bool bleInitialized = false;
 static BLEService gService(BLE_SERVICE_UUID);
 static BLECharacteristic gCharacteristic(BLE_CHARACTERISTIC_UUID);
 static BLECharacteristic *pCharacteristic = nullptr;
+static BatteryMonitor batteryMonitor(PIN_BATTERY_ADC);
+static float batteryVoltage = 0.0f;
+static uint16_t batteryRawAdc = 0;
+static uint16_t batterySenseMillivolts = 0;
+static uint16_t batteryMillivolts = 0;
+static uint8_t batteryPercentage = 0;
+static unsigned long lastBatteryReadMs = 0;
+static bool batteryReadValid = false;
+
+static constexpr uint8_t LED_ON = LOW;
+static constexpr uint8_t LED_OFF = HIGH;
+
+static void setRgbLed(bool red, bool green, bool blue) {
+    digitalWrite(PIN_LED_RED, red ? LED_ON : LED_OFF);
+    digitalWrite(PIN_LED_GREEN, green ? LED_ON : LED_OFF);
+    digitalWrite(PIN_LED_BLUE, blue ? LED_ON : LED_OFF);
+}
+
+static void updateBatteryLed(uint8_t percentage) {
+    if (percentage >= 67) {
+        setRgbLed(false, true, false);
+    } else if (percentage >= 34) {
+        setRgbLed(false, false, true);
+    } else {
+        setRgbLed(true, false, false);
+    }
+}
+
+static void updateBatteryReading(unsigned long now) {
+    if (batteryReadValid && (now - lastBatteryReadMs) < 5000UL) {
+        return;
+    }
+
+    BatteryReading reading = batteryMonitor.readBattery();
+    batteryRawAdc = reading.rawAdc;
+    batterySenseMillivolts = reading.senseMillivolts;
+    batteryMillivolts = reading.batteryMillivolts;
+    batteryPercentage = reading.percentage;
+    batteryVoltage = batteryMillivolts / 1000.0f;
+    updateBatteryLed(batteryPercentage);
+    lastBatteryReadMs = now;
+    batteryReadValid = true;
+}
 
 static void startAdvertising() {
     Bluefruit.Advertising.stop();
@@ -53,6 +97,7 @@ static void applyTrainingTiming(const String &valueRaw) {
     value.trim();
     value.toUpperCase();
 
+    TrainingAlertStyle previous = trainingSubModeIndex;
     if (value == "INSTANT") {
         trainingSubModeIndex = TrainingAlertStyle::Instant; // Instant
         rtt.println("BLE CMD: POSTURE_TIMING=INSTANT");
@@ -63,6 +108,10 @@ static void applyTrainingTiming(const String &valueRaw) {
         trainingSubModeIndex = TrainingAlertStyle::Instant; // Fallback to Instant
         rtt.println("BLE CMD: POSTURE_TIMING=AUTOMATIC");
     }
+
+    if (currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
+        markSubModeChanged();
+    }
 }
 
 static void applyTherapyDurationMinutes(const String &valueRaw) {
@@ -71,6 +120,7 @@ static void applyTherapyDurationMinutes(const String &valueRaw) {
     int mins = value.toInt();
     if (mins <= 0) return;
 
+    uint8_t previous = therapySubModeIndex;
     if (mins == 10) {
         therapySubModeIndex = 0;
     } else if (mins == 20) {
@@ -79,6 +129,12 @@ static void applyTherapyDurationMinutes(const String &valueRaw) {
         therapySubModeIndex = 2;
     } else {
         therapySubModeIndex = 0; // default 10 min
+    }
+    if (therapySubModeIndex != previous) {
+        if (currentMode == MODE_THERAPY) {
+            therapyStop(false);
+            markSubModeChanged();
+        }
     }
     rtt.printf("BLE CMD: THERAPY_DURATION_MIN=%d\n", mins);
 }
@@ -93,17 +149,26 @@ static void applyMode(const String &valueRaw) {
     value.trim();
     value.toUpperCase();
 
+    Mode previousMode = currentMode;
     if (value == "TRACKING") {
         deviceOn = true;
+        TrainingAlertStyle previous = trainingSubModeIndex;
         trainingSubModeIndex = TrainingAlertStyle::NoAlerts; // No alerts (equivalent to tracking)
         setDeviceMode(MODE_TRAINING);
+        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
+            markSubModeChanged();
+        }
         rtt.println("BLE CMD: MODE=TRACKING");
     } else if (value == "TRAINING" || value == "POSTURE") {
         deviceOn = true;
+        TrainingAlertStyle previous = trainingSubModeIndex;
         if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
             trainingSubModeIndex = TrainingAlertStyle::Instant; // Default back to Instant if it was tracking
         }
         setDeviceMode(MODE_TRAINING);
+        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
+            markSubModeChanged();
+        }
         rtt.println("BLE CMD: MODE=TRAINING");
     } else if (value == "THERAPY") {
         deviceOn = true;
@@ -306,6 +371,12 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
 void bluetoothSetup() {
     rtt.print("Initializing BLE as: ");
     rtt.println(BLE_DEVICE_NAME);
+    pinMode(PIN_LED_RED, OUTPUT);
+    pinMode(PIN_LED_GREEN, OUTPUT);
+    pinMode(PIN_LED_BLUE, OUTPUT);
+    setRgbLed(false, false, false);
+    batteryMonitor.begin();
+    updateBatteryReading(millis());
 
     if (!bleInitialized) {
         Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
@@ -414,14 +485,12 @@ void bluetoothLoop() {
             "\"calibration_result\":\"%s\",", calibResult);
     }
 
-    // Dummy values for battery since pin is not defined
-    float dummyBatteryVolt = 3.82f;
-    int dummyBatteryPct = 80;
+    updateBatteryReading(now);
 
     if (offset < sizeof(jsonBuffer)) {
         offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
             "\"posture\":\"%s\",\"is_bad_posture\":%s,\"battery_voltage\":%.2f,\"battery_percentage\":%d",
-            postureText, isBadPosture ? "true" : "false", dummyBatteryVolt, dummyBatteryPct
+            postureText, isBadPosture ? "true" : "false", batteryVoltage, batteryPercentage
         );
     }
 
@@ -493,7 +562,7 @@ void bluetoothLoop() {
     static unsigned long lastStatusMs = 0;
     if (!isCalibrating() && (now - lastStatusMs) >= ALIGN_RTT_STATUS_INTERVAL_MS) {
         lastStatusMs = now;
-        rtt.printf("STATUS mode=%s profile=%s profiles=%u angle=%s deg dir=%s posture=%s bad=%s steps=%lu\n",
+        rtt.printf("STATUS mode=%s profile=%s profiles=%u angle=%s deg dir=%s posture=%s bad=%s batt_mv=%u batper_mv=%u batt_adc=%u batt_pct=%u steps=%lu\n",
                    modeString,
                    profileName,
                    (unsigned)getProfileCount(),
@@ -501,6 +570,10 @@ void bluetoothLoop() {
                    directionText,
                    postureText,
                    isBadPosture ? "Y" : "N",
+                   batteryMillivolts,
+                   batterySenseMillivolts,
+                   batteryRawAdc,
+                   batteryPercentage,
                    (unsigned long)getDeviceStepCount());
     }
 #endif

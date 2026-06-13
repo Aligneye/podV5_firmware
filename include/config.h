@@ -10,8 +10,8 @@
 
 // ── RGB LED ───────────────────────────────────────────────
 #define PIN_LED_RED     13   // P0.13 → Arduino 13
-#define PIN_LED_GREEN   14   // P0.14 → Arduino 14
-#define PIN_LED_BLUE    15  // P0.15 → Arduino 15
+#define PIN_LED_BLUE    14   // P0.14 → Arduino 14
+#define PIN_LED_GREEN   15   // P0.15 → Arduino 15
 
 // ── Motor ─────────────────────────────────────────────────
 #define PIN_MOTOR       17   // P0.17 → Arduino 17
@@ -24,12 +24,14 @@
 // P0.21 → hardware reset, not used in firmware
 
 // ── Battery ADC ───────────────────────────────────────────
-// No fixed pin assigned yet
+#define PIN_BATTERY_ADC A0   // BATPER → P0.02/AIN0
 
 // ── Button timing (ms) ────────────────────────────────────
 #define DEBOUNCE_MS         50
 #define DOUBLE_CLICK_GAP_MS 400
 #define HOLD_MS             1000
+#define MODE_SWITCH_DELAY_MS    500UL
+#define SUBMODE_SWITCH_DELAY_MS 250UL
 
 // ── Vibration intensity (PWM 0-255) ───────────────────────
 #define VIB_INTENSITY_LOW   160

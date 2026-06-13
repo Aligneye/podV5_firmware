@@ -35,9 +35,11 @@ extern Mode               currentMode;
 extern TrainingAlertStyle trainingSubModeIndex;
 extern uint8_t therapySubModeIndex;
 extern unsigned long lastModeChangeMs;
+extern unsigned long lastModeChangeDelayMs;
 
 // ── Public API ─────────────────────────────────────────────────────────────
 void buttonSetup();
 void buttonLoop();
 void setDeviceMode(Mode newMode);
+void markSubModeChanged();
 
