@@ -51,7 +51,7 @@ void setup() {
 void loop() {
     buttonLoop();
     motorUpdate();
-    if (currentMode == MODE_OFF || (millis() - lastModeChangeMs < 1000)) {
+    if (currentMode == MODE_OFF || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
         return;
     }
     therapyLoop();

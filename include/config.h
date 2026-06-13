@@ -30,6 +30,8 @@
 #define DEBOUNCE_MS         50
 #define DOUBLE_CLICK_GAP_MS 400
 #define HOLD_MS             1000
+#define MODE_SWITCH_DELAY_MS    500UL
+#define SUBMODE_SWITCH_DELAY_MS 250UL
 
 // ── Vibration intensity (PWM 0-255) ───────────────────────
 #define VIB_INTENSITY_LOW   160

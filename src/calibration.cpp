@@ -13,34 +13,27 @@ extern RTTStream rtt;
 enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };
 static CalibState calibState = CALIB_STATE_IDLE;
 
-static constexpr uint32_t CALIB_GET_READY_MS       = 0UL;
-static constexpr uint32_t CALIB_HOLD_MS            = 5000UL;
+static constexpr uint32_t CALIB_GET_READY_MS       = 3000UL;
+static constexpr uint32_t CALIB_HOLD_MS            = 8000UL;
 static constexpr uint32_t CALIB_TOTAL_MS           = CALIB_GET_READY_MS + CALIB_HOLD_MS;
 static constexpr uint32_t CALIB_RESULT_BROADCAST_MS = 4000UL;
-static constexpr uint32_t kSafetyTimeoutMs         = 10000UL;
+static constexpr uint32_t kSafetyTimeoutMs         = CALIB_TOTAL_MS + 2000UL;
 static constexpr uint32_t kSampleIntervalMs        = 50UL;
+static constexpr int      kMaxCalibrationSamples   = 200;
 static constexpr int      MIN_VALID_SAMPLES        = 70;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
 
 static unsigned long stabilityStartTime = 0;
-static unsigned long lastBeepTime       = 0;
 static unsigned long lastHoldPrintMs     = 0;
-static float         lastCalibX         = 0;
-static float         lastCalibY         = 0;
-static float         lastCalibZ         = 0;
 
-static float         sumX               = 0;
-static float         sumY               = 0;
-static float         sumZ               = 0;
-static int           sampleCount        = 0;
 static int           totalSamples       = 0;
 static unsigned long s_lastSampleTime   = 0;
 
-static float         samplesX[100];
-static float         samplesY[100];
-static float         samplesZ[100];
+static float         samplesX[kMaxCalibrationSamples];
+static float         samplesY[kMaxCalibrationSamples];
+static float         samplesZ[kMaxCalibrationSamples];
 
 static char          lastCalibrationResult[16] = "";
 static unsigned long calibrationResultSetAt    = 0;
@@ -154,13 +147,33 @@ void handleCalibration() {
     static unsigned long lastDebugPrintMs = 0;
     if (currentMillis - lastDebugPrintMs >= 1000UL) {
         lastDebugPrintMs = currentMillis;
-        rtt.printf("DEBUG: calibState=%d, elapsed=%lu, totalSamples=%d, sampleCount=%d, dtSample=%lu\n",
-                   (int)calibState, elapsed, totalSamples, sampleCount, currentMillis - s_lastSampleTime);
+        rtt.printf("DEBUG: calibState=%d, elapsed=%lu, totalSamples=%d, dtSample=%lu\n",
+                   (int)calibState, elapsed, totalSamples, currentMillis - s_lastSampleTime);
     }
 #endif
 
     if (elapsed > kSafetyTimeoutMs) {
         calibrationFail("Timeout");
+        return;
+    }
+
+    if (calibState == CALIB_STATE_GET_READY) {
+        if (currentMillis - lastHoldPrintMs >= 1000UL) {
+            lastHoldPrintMs = currentMillis;
+            uint32_t msLeft = (CALIB_GET_READY_MS > elapsed) ? (CALIB_GET_READY_MS - elapsed) : 0;
+            int secondsLeft = (msLeft + 500UL) / 1000UL;
+            if (secondsLeft > 0) {
+                rtt.printf("CALIBRATION: GET READY - %d sec\n", secondsLeft);
+            }
+        }
+
+        if (elapsed >= CALIB_GET_READY_MS) {
+            calibState = CALIB_STATE_HOLD_STILL;
+            lastHoldPrintMs = currentMillis;
+            s_lastSampleTime = currentMillis - kSampleIntervalMs;
+            totalSamples = 0;
+            rtt.println("CALIBRATION: HOLD STILL - 8 sec");
+        }
         return;
     }
 
@@ -183,7 +196,7 @@ void handleCalibration() {
                 return;
             }
 
-            if (totalSamples < 100) {
+            if (totalSamples < kMaxCalibrationSamples) {
                 samplesX[totalSamples] = rawX;
                 samplesY[totalSamples] = rawY;
                 samplesZ[totalSamples] = rawZ;
@@ -293,10 +306,6 @@ void startCalibration() {
     if (calibState != CALIB_STATE_IDLE) {
         return;
     }
-    if (!trainingSampleAccelForCalibration()) {
-        rtt.println("Calibration: cannot start (no accelerometer)");
-        return;
-    }
 
     lastCalibrationResult[0] = '\0';
     calibrationResultSetAt = 0;
@@ -311,25 +320,16 @@ void startCalibration() {
     motorSetDuty(0);
     motorOverrideDuty(150, 150);
 
-    calibState         = CALIB_STATE_HOLD_STILL;
+    calibState         = CALIB_STATE_GET_READY;
     stabilityStartTime = millis();
-    lastBeepTime       = millis();
     lastHoldPrintMs    = millis();
 
-    sumX        = 0;
-    sumY        = 0;
-    sumZ        = 0;
-    sampleCount = 0;
     totalSamples = 0;
-
-    lastCalibX = rawX;
-    lastCalibY = rawY;
-    lastCalibZ = rawZ;
 
     s_lastSampleTime = millis();
 
     rtt.println("CALIBRATION: START");
-    rtt.println("CALIBRATION: HOLD STILL - 5 sec");
+    rtt.println("CALIBRATION: GET READY - 3 sec");
 }
 
 void cancelCalibration() {

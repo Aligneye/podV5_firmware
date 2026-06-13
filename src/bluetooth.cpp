@@ -97,6 +97,7 @@ static void applyTrainingTiming(const String &valueRaw) {
     value.trim();
     value.toUpperCase();
 
+    TrainingAlertStyle previous = trainingSubModeIndex;
     if (value == "INSTANT") {
         trainingSubModeIndex = TrainingAlertStyle::Instant; // Instant
         rtt.println("BLE CMD: POSTURE_TIMING=INSTANT");
@@ -107,6 +108,10 @@ static void applyTrainingTiming(const String &valueRaw) {
         trainingSubModeIndex = TrainingAlertStyle::Instant; // Fallback to Instant
         rtt.println("BLE CMD: POSTURE_TIMING=AUTOMATIC");
     }
+
+    if (currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
+        markSubModeChanged();
+    }
 }
 
 static void applyTherapyDurationMinutes(const String &valueRaw) {
@@ -115,6 +120,7 @@ static void applyTherapyDurationMinutes(const String &valueRaw) {
     int mins = value.toInt();
     if (mins <= 0) return;
 
+    uint8_t previous = therapySubModeIndex;
     if (mins == 10) {
         therapySubModeIndex = 0;
     } else if (mins == 20) {
@@ -123,6 +129,12 @@ static void applyTherapyDurationMinutes(const String &valueRaw) {
         therapySubModeIndex = 2;
     } else {
         therapySubModeIndex = 0; // default 10 min
+    }
+    if (therapySubModeIndex != previous) {
+        if (currentMode == MODE_THERAPY) {
+            therapyStop(false);
+            markSubModeChanged();
+        }
     }
     rtt.printf("BLE CMD: THERAPY_DURATION_MIN=%d\n", mins);
 }
@@ -137,17 +149,26 @@ static void applyMode(const String &valueRaw) {
     value.trim();
     value.toUpperCase();
 
+    Mode previousMode = currentMode;
     if (value == "TRACKING") {
         deviceOn = true;
+        TrainingAlertStyle previous = trainingSubModeIndex;
         trainingSubModeIndex = TrainingAlertStyle::NoAlerts; // No alerts (equivalent to tracking)
         setDeviceMode(MODE_TRAINING);
+        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
+            markSubModeChanged();
+        }
         rtt.println("BLE CMD: MODE=TRACKING");
     } else if (value == "TRAINING" || value == "POSTURE") {
         deviceOn = true;
+        TrainingAlertStyle previous = trainingSubModeIndex;
         if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
             trainingSubModeIndex = TrainingAlertStyle::Instant; // Default back to Instant if it was tracking
         }
         setDeviceMode(MODE_TRAINING);
+        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
+            markSubModeChanged();
+        }
         rtt.println("BLE CMD: MODE=TRAINING");
     } else if (value == "THERAPY") {
         deviceOn = true;
