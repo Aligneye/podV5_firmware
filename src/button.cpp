@@ -55,6 +55,8 @@ void setDeviceMode(Mode newMode) {
     return;
   }
 
+  Mode previousMode = currentMode;
+
   // 1. Stop active tasks in the PREVIOUS mode immediately
   if (currentMode == MODE_TRAINING) {
     trainingStop();
@@ -78,6 +80,9 @@ void setDeviceMode(Mode newMode) {
     offPrinted = false;
   } else if (currentMode == MODE_TRAINING) {
     trainingStarted = false;
+    if (previousMode == MODE_OFF) {
+      bluetoothRequestBatteryStatusBlink();
+    }
   }
 }
 

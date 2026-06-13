@@ -26,23 +26,29 @@ static uint16_t batteryMillivolts = 0;
 static uint8_t batteryPercentage = 0;
 static unsigned long lastBatteryReadMs = 0;
 static bool batteryReadValid = false;
+static bool batteryBlinkActive = false;
+static unsigned long batteryBlinkStartMs = 0;
 
-static constexpr uint8_t LED_ON = LOW;
-static constexpr uint8_t LED_OFF = HIGH;
+static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
+static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 
-static void setRgbLed(bool red, bool green, bool blue) {
-    digitalWrite(PIN_LED_RED, red ? LED_ON : LED_OFF);
-    digitalWrite(PIN_LED_GREEN, green ? LED_ON : LED_OFF);
-    digitalWrite(PIN_LED_BLUE, blue ? LED_ON : LED_OFF);
+static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
+    analogWrite(PIN_LED_RED, 255 - red);
+    analogWrite(PIN_LED_GREEN, 255 - green);
+    analogWrite(PIN_LED_BLUE, 255 - blue);
 }
 
-static void updateBatteryLed(uint8_t percentage) {
+static void turnRgbLedOff() {
+    setRgbLedPwm(0, 0, 0);
+}
+
+static void updateBatteryLed(uint8_t percentage, uint8_t brightness = 255) {
     if (percentage >= 67) {
-        setRgbLed(false, true, false);
+        setRgbLedPwm(0, brightness, 0);
     } else if (percentage >= 34) {
-        setRgbLed(false, false, true);
+        setRgbLedPwm(brightness, brightness, 0);
     } else {
-        setRgbLed(true, false, false);
+        setRgbLedPwm(brightness, 0, 0);
     }
 }
 
@@ -57,9 +63,42 @@ static void updateBatteryReading(unsigned long now) {
     batteryMillivolts = reading.batteryMillivolts;
     batteryPercentage = reading.percentage;
     batteryVoltage = batteryMillivolts / 1000.0f;
-    updateBatteryLed(batteryPercentage);
     lastBatteryReadMs = now;
     batteryReadValid = true;
+}
+
+static void updateBatteryStatusBlink(unsigned long now) {
+    if (!batteryBlinkActive) {
+        return;
+    }
+
+    if (batteryBlinkStartMs == 0UL) {
+        batteryBlinkStartMs = now;
+    }
+
+    updateBatteryReading(now);
+
+    const unsigned long elapsed = now - batteryBlinkStartMs;
+    const unsigned long totalBlinkMs = (unsigned long)BATTERY_BLINK_COUNT * BATTERY_BLINK_PERIOD_MS;
+    if (elapsed >= totalBlinkMs) {
+        batteryBlinkActive = false;
+        turnRgbLedOff();
+        return;
+    }
+
+    const unsigned long phaseMs = elapsed % BATTERY_BLINK_PERIOD_MS;
+    uint8_t brightness = 0;
+    if (phaseMs < (BATTERY_BLINK_PERIOD_MS / 2UL)) {
+        brightness = (uint8_t)((phaseMs * 255UL) / (BATTERY_BLINK_PERIOD_MS / 2UL));
+    } else {
+        brightness = (uint8_t)(((BATTERY_BLINK_PERIOD_MS - phaseMs) * 255UL) / (BATTERY_BLINK_PERIOD_MS / 2UL));
+    }
+
+    if (brightness == 0) {
+        turnRgbLedOff();
+    } else {
+        updateBatteryLed(batteryPercentage, brightness);
+    }
 }
 
 static void startAdvertising() {
@@ -374,7 +413,7 @@ void bluetoothSetup() {
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_GREEN, OUTPUT);
     pinMode(PIN_LED_BLUE, OUTPUT);
-    setRgbLed(false, false, false);
+    turnRgbLedOff();
     batteryMonitor.begin();
     updateBatteryReading(millis());
 
@@ -409,6 +448,8 @@ void bluetoothLoop() {
 
     static unsigned long last = 0;
     unsigned long now = millis();
+    updateBatteryStatusBlink(now);
+
     unsigned long interval = isCalibrating() ? 150UL : 500UL;
     if (now - last < interval) return;
     last = now;
@@ -601,6 +642,11 @@ bool bluetoothIsConnected() {
 
 void bluetoothRequestCalibrationStart() {
     calibrationRequestStart();
+}
+
+void bluetoothRequestBatteryStatusBlink() {
+    batteryBlinkActive = true;
+    batteryBlinkStartMs = 0UL;
 }
 
 void notifyNewSessionStored() {

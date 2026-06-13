@@ -34,7 +34,7 @@ extern RTTStream rtt;
 static constexpr float kLpfAlpha = 0.1f;
 static constexpr float kMotionThreshold = 2.0f;
 static constexpr float kDirectionDeg = 20.0f;
-float kBadPostureDeg = 25.0f;
+float kBadPostureDeg = 30.0f;
 static constexpr float kAngleClampDeg = 90.0f;
 static constexpr float kDefaultOriginY = 6.75f;
 static constexpr float kDefaultOriginZ = 6.75f;

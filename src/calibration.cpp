@@ -14,13 +14,16 @@ enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STIL
 static CalibState calibState = CALIB_STATE_IDLE;
 
 static constexpr uint32_t CALIB_GET_READY_MS       = 3000UL;
-static constexpr uint32_t CALIB_HOLD_MS            = 8000UL;
+static constexpr uint32_t CALIB_HOLD_MS            = 5000UL;
 static constexpr uint32_t CALIB_TOTAL_MS           = CALIB_GET_READY_MS + CALIB_HOLD_MS;
 static constexpr uint32_t CALIB_RESULT_BROADCAST_MS = 4000UL;
 static constexpr uint32_t kSafetyTimeoutMs         = CALIB_TOTAL_MS + 2000UL;
 static constexpr uint32_t kSampleIntervalMs        = 50UL;
 static constexpr int      kMaxCalibrationSamples   = 200;
 static constexpr int      MIN_VALID_SAMPLES        = 70;
+static constexpr int      kEarlyFailMinSamples     = 40;
+static constexpr float    kFinalStdDevLimit        = 1.0f;
+static constexpr float    kEarlyFailStdDevLimit    = 1.75f;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
@@ -46,6 +49,15 @@ static float s_lastCalibratedX = 0.0f;
 static float s_lastCalibratedY = 0.0f;
 static float s_lastCalibratedZ = 0.0f;
 static bool  s_lastCalibrationValid = false;
+
+struct CalibrationStats {
+    float meanX;
+    float meanY;
+    float meanZ;
+    float stdDevX;
+    float stdDevY;
+    float stdDevZ;
+};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 static void goToTrainingMode() {
@@ -100,6 +112,43 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     motorOverrideDuty(150, 125);
 
     goToTrainingMode();
+}
+
+static CalibrationStats calculateCalibrationStats(int sampleLimit) {
+    CalibrationStats stats = {0, 0, 0, 0, 0, 0};
+    if (sampleLimit <= 0) {
+        return stats;
+    }
+
+    float sumAllX = 0, sumAllY = 0, sumAllZ = 0;
+    for (int i = 0; i < sampleLimit; i++) {
+        sumAllX += samplesX[i];
+        sumAllY += samplesY[i];
+        sumAllZ += samplesZ[i];
+    }
+
+    stats.meanX = sumAllX / (float)sampleLimit;
+    stats.meanY = sumAllY / (float)sampleLimit;
+    stats.meanZ = sumAllZ / (float)sampleLimit;
+
+    float varX = 0, varY = 0, varZ = 0;
+    for (int i = 0; i < sampleLimit; i++) {
+        float dx = samplesX[i] - stats.meanX;
+        float dy = samplesY[i] - stats.meanY;
+        float dz = samplesZ[i] - stats.meanZ;
+        varX += dx * dx;
+        varY += dy * dy;
+        varZ += dz * dz;
+    }
+
+    stats.stdDevX = sqrtf(varX / (float)sampleLimit);
+    stats.stdDevY = sqrtf(varY / (float)sampleLimit);
+    stats.stdDevZ = sqrtf(varZ / (float)sampleLimit);
+    return stats;
+}
+
+static bool calibrationStatsTooUnstable(const CalibrationStats& stats, float limit) {
+    return stats.stdDevX > limit || stats.stdDevY > limit || stats.stdDevZ > limit;
 }
 
 // ── Temporary Calibration Results retrieval ─────────────────────────────────
@@ -172,7 +221,7 @@ void handleCalibration() {
             lastHoldPrintMs = currentMillis;
             s_lastSampleTime = currentMillis - kSampleIntervalMs;
             totalSamples = 0;
-            rtt.println("CALIBRATION: HOLD STILL - 8 sec");
+            rtt.println("CALIBRATION: HOLD STILL - 5 sec");
         }
         return;
     }
@@ -207,6 +256,14 @@ void handleCalibration() {
                            totalSamples, String(rawX, 2).c_str(), String(rawY, 2).c_str(), String(rawZ, 2).c_str());
 #endif
             }
+
+            if (totalSamples >= kEarlyFailMinSamples && (totalSamples % 10) == 0) {
+                CalibrationStats earlyStats = calculateCalibrationStats(totalSamples);
+                if (calibrationStatsTooUnstable(earlyStats, kEarlyFailStdDevLimit)) {
+                    calibrationFail("Too much movement");
+                    return;
+                }
+            }
         }
 
         if (elapsed >= CALIB_TOTAL_MS) {
@@ -215,39 +272,16 @@ void handleCalibration() {
                 return;
             }
 
-            // Pass 1: Calculate Mean of all collected samples
-            float sumAllX = 0, sumAllY = 0, sumAllZ = 0;
-            for (int i = 0; i < totalSamples; i++) {
-                sumAllX += samplesX[i];
-                sumAllY += samplesY[i];
-                sumAllZ += samplesZ[i];
-            }
-            float meanX = sumAllX / (float)totalSamples;
-            float meanY = sumAllY / (float)totalSamples;
-            float meanZ = sumAllZ / (float)totalSamples;
-
-            // Pass 2: Calculate Variance and Standard Deviation
-            float varX = 0, varY = 0, varZ = 0;
-            for (int i = 0; i < totalSamples; i++) {
-                float dx = samplesX[i] - meanX;
-                float dy = samplesY[i] - meanY;
-                float dz = samplesZ[i] - meanZ;
-                varX += dx * dx;
-                varY += dy * dy;
-                varZ += dz * dz;
-            }
-            float stdDevX = sqrtf(varX / (float)totalSamples);
-            float stdDevY = sqrtf(varY / (float)totalSamples);
-            float stdDevZ = sqrtf(varZ / (float)totalSamples);
+            CalibrationStats finalStats = calculateCalibrationStats(totalSamples);
 
 #if ALIGN_RTT_CALIB_VERBOSE
             rtt.printf("CALIB STATS: Mean[%s, %s, %s], StdDev[%s, %s, %s]\n",
-                       String(meanX, 2).c_str(), String(meanY, 2).c_str(), String(meanZ, 2).c_str(),
-                       String(stdDevX, 2).c_str(), String(stdDevY, 2).c_str(), String(stdDevZ, 2).c_str());
+                       String(finalStats.meanX, 2).c_str(), String(finalStats.meanY, 2).c_str(), String(finalStats.meanZ, 2).c_str(),
+                       String(finalStats.stdDevX, 2).c_str(), String(finalStats.stdDevY, 2).c_str(), String(finalStats.stdDevZ, 2).c_str());
 #endif
 
             // Safety limit: if standard deviation is too high, posture is too unstable
-            if (stdDevX > 1.0f || stdDevY > 1.0f || stdDevZ > 1.0f) {
+            if (calibrationStatsTooUnstable(finalStats, kFinalStdDevLimit)) {
                 calibrationFail("Too much movement");
                 return;
             }
@@ -258,9 +292,9 @@ void handleCalibration() {
 
             for (int i = 0; i < totalSamples; i++) {
                 // If stdDev is near zero, accept all (protect from floating point edge case)
-                bool okX = (stdDevX < 0.01f) || (fabsf(samplesX[i] - meanX) <= 2.0f * stdDevX);
-                bool okY = (stdDevY < 0.01f) || (fabsf(samplesY[i] - meanY) <= 2.0f * stdDevY);
-                bool okZ = (stdDevZ < 0.01f) || (fabsf(samplesZ[i] - meanZ) <= 2.0f * stdDevZ);
+                bool okX = (finalStats.stdDevX < 0.01f) || (fabsf(samplesX[i] - finalStats.meanX) <= 2.0f * finalStats.stdDevX);
+                bool okY = (finalStats.stdDevY < 0.01f) || (fabsf(samplesY[i] - finalStats.meanY) <= 2.0f * finalStats.stdDevY);
+                bool okZ = (finalStats.stdDevZ < 0.01f) || (fabsf(samplesZ[i] - finalStats.meanZ) <= 2.0f * finalStats.stdDevZ);
 
                 if (okX && okY && okZ) {
                     finalSumX += samplesX[i];
