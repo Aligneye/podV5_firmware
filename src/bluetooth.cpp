@@ -29,6 +29,7 @@ static bool blePairingKnownPaired = false;
 static bool clearBondsAfterDisconnect = false;
 static bool connectionHapticPending = false;
 static bool connectionHapticPlayed = false;
+static bool disconnectionHapticPending = false;
 static unsigned long connectedSinceMs = 0;
 
 static BLEService gService(BLE_SERVICE_UUID);
@@ -49,6 +50,8 @@ static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
 static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
+static constexpr uint8_t DISCONNECTION_HAPTIC_DUTY = 150;
+static constexpr uint16_t DISCONNECTION_HAPTIC_MS = 250;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
@@ -184,6 +187,7 @@ static void onBleConnect(uint16_t conn_handle) {
     connected = true;
     connectionHapticPending = true;
     connectionHapticPlayed = false;
+    disconnectionHapticPending = false;
     connectedSinceMs = millis();
     turnRgbLedOff();
     rtt.println("BLE: Connected");
@@ -196,6 +200,7 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
+    disconnectionHapticPending = true;
     connectedSinceMs = 0UL;
     rtt.println("BLE: Disconnected");
 
@@ -544,6 +549,12 @@ void bluetoothLoop() {
         motorSetDuty(0);
         motorOverrideDuty(150, 125);
     }
+    if (disconnectionHapticPending && !calibrationMotorActive()) {
+        disconnectionHapticPending = false;
+        motorCancelFeedback();
+        motorSetDuty(0);
+        motorOverrideDuty(DISCONNECTION_HAPTIC_DUTY, DISCONNECTION_HAPTIC_MS);
+    }
 
     if (!updatePairingLed(now)) {
         updateBatteryStatusBlink(now);
@@ -748,6 +759,7 @@ void bluetoothUnlockForPairing() {
     clearBondsAfterDisconnect = false;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
+    disconnectionHapticPending = false;
     connectedSinceMs = 0UL;
     saveBlePairMarker(false);
 
