@@ -51,6 +51,7 @@ void setup() {
 void loop() {
     buttonLoop();
     motorUpdate();
+    bluetoothLoop();
     if (currentMode == MODE_OFF || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
         return;
     }
@@ -59,7 +60,6 @@ void loop() {
     // applies short success/fail buzz afterward (see calibration.cpp).
     trainingLoop();
     calibrationLoop();
-    bluetoothLoop();
     maintainDeviceTime();
     updateSessionStats();
     maintainSessionStats();

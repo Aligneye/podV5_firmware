@@ -40,9 +40,7 @@ static OneButton btn(PIN_BUTTON, true, true);
 static void playButtonPressHaptic() {
   if (calibrationMotorActive())
     return;
-  // Use a low duty cycle (80) to prevent brownout reset while providing haptic
-  // feedback
-  motorOverrideDuty(150, 125);
+  motorOverrideDuty(130, 70);
 }
 
 void markSubModeChanged() {
@@ -68,6 +66,7 @@ void setDeviceMode(Mode newMode) {
     calibrationRequestCancel();
   }
 
+  motorCancelFeedback();
   motorSetDuty(0);
 
   // 2. Transition to new mode
@@ -133,6 +132,28 @@ static void handleDoubleClick() {
   }
 }
 
+static void handleMultiClick() {
+  int clicks = btn.getNumberClicks();
+  if (clicks != 3) {
+    return;
+  }
+
+  DEBUG_PRINTLN("Triple click");
+
+  if (isCalibrating()) {
+    DEBUG_PRINTLN("Button triple-click detected during calibration - canceling");
+    setDeviceMode(MODE_TRAINING);
+    return;
+  }
+
+  if (currentMode != MODE_OFF) {
+    DEBUG_PRINTLN("Triple click ignored outside OFF mode");
+    return;
+  }
+
+  bluetoothUnlockForPairing();
+}
+
 static void handleHold() {
   DEBUG_PRINTLN("Hold");
 
@@ -154,8 +175,11 @@ void buttonSetup() {
   btn.attachPress(playButtonPressHaptic);
   btn.attachClick(handleSingleClick);
   btn.attachDoubleClick(handleDoubleClick);
+  btn.attachMultiClick(handleMultiClick);
   btn.attachLongPressStart(handleHold);
 
+  btn.setDebounceMs(DEBOUNCE_MS);
+  btn.setClickMs(DOUBLE_CLICK_GAP_MS);
   // Set long press duration (matching HOLD_MS)
   btn.setPressMs(HOLD_MS);
 
@@ -180,7 +204,6 @@ void buttonLoop() {
 
     if (currentMode == MODE_TRAINING && !trainingStarted) {
       deviceOn = true;
-      bluetoothStartAdvertising();
       trainingStarted = true;
     }
 
