@@ -149,6 +149,11 @@ static void handleMultiClick() {
     return;
   }
 
+  if (currentMode != MODE_OFF) {
+    DEBUG_PRINTLN("Triple click ignored outside OFF mode");
+    return;
+  }
+
   bluetoothUnlockForPairing();
 }
 
