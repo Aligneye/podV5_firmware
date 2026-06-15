@@ -10,6 +10,7 @@ void bluetoothLoop();
 void bluetoothStartAdvertising();
 void bluetoothStopAdvertising();
 bool bluetoothIsConnected();
+void bluetoothUnlockForPairing();
 
 /** Safe from BLE RX callback: only sets a deferred flag (see calibration). */
 void bluetoothRequestCalibrationStart();

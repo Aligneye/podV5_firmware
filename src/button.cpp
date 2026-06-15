@@ -133,6 +133,24 @@ static void handleDoubleClick() {
   }
 }
 
+static void handleMultiClick() {
+  int clicks = btn.getNumberClicks();
+  if (clicks != 3) {
+    return;
+  }
+
+  DEBUG_PRINTLN("Triple click");
+
+  if (isCalibrating()) {
+    DEBUG_PRINTLN("Button triple-click detected during calibration - canceling");
+    setDeviceMode(MODE_TRAINING);
+    return;
+  }
+
+  playButtonPressHaptic();
+  bluetoothUnlockForPairing();
+}
+
 static void handleHold() {
   DEBUG_PRINTLN("Hold");
 
@@ -154,8 +172,11 @@ void buttonSetup() {
   btn.attachPress(playButtonPressHaptic);
   btn.attachClick(handleSingleClick);
   btn.attachDoubleClick(handleDoubleClick);
+  btn.attachMultiClick(handleMultiClick);
   btn.attachLongPressStart(handleHold);
 
+  btn.setDebounceMs(DEBOUNCE_MS);
+  btn.setClickMs(DOUBLE_CLICK_GAP_MS);
   // Set long press duration (matching HOLD_MS)
   btn.setPressMs(HOLD_MS);
 

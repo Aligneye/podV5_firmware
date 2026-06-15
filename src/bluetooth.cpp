@@ -7,6 +7,14 @@
 #include "session_stats.h"
 #include "BatteryMonitor.h"
 #include <bluefruit.h>
+#if __has_include(<InternalFileSystem.h>)
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
+using namespace Adafruit_LittleFS_Namespace;
+#define BLE_PAIR_STORE_HAS_FS 1
+#else
+#define BLE_PAIR_STORE_HAS_FS 0
+#endif
 
 int therapyIntensityLevel = 2; // Default to Mid (2)
 
@@ -14,6 +22,11 @@ extern RTTStream rtt;
 
 static bool connected = false;
 static bool bleInitialized = false;
+static uint16_t currentConnHandle = BLE_CONN_HANDLE_INVALID;
+static bool pairingUnlockActive = true;
+static bool pairingCalmBlinkActive = false;
+static unsigned long pairingCalmBlinkStartMs = 0;
+static bool blePairingKnownPaired = false;
 
 static BLEService gService(BLE_SERVICE_UUID);
 static BLECharacteristic gCharacteristic(BLE_CHARACTERISTIC_UUID);
@@ -31,6 +44,10 @@ static unsigned long batteryBlinkStartMs = 0;
 
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
+static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
+static constexpr uint32_t PAIRING_CALM_BLINK_MS = 5000UL;
+static constexpr uint32_t PAIRING_CALM_BLINK_PERIOD_MS = 2000UL;
+static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
     analogWrite(PIN_LED_RED, 255 - red);
@@ -40,6 +57,39 @@ static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
 
 static void turnRgbLedOff() {
     setRgbLedPwm(0, 0, 0);
+}
+
+static bool loadBlePairMarker() {
+#if BLE_PAIR_STORE_HAS_FS
+    InternalFS.begin();
+    File file = InternalFS.open(BLE_PAIR_MARKER_PATH, FILE_O_READ);
+    if (!file) return false;
+
+    uint8_t marker = 0;
+    int readBytes = file.read(&marker, sizeof(marker));
+    file.close();
+    return readBytes == (int)sizeof(marker) && marker == 1u;
+#else
+    return false;
+#endif
+}
+
+static void saveBlePairMarker(bool paired) {
+#if BLE_PAIR_STORE_HAS_FS
+    InternalFS.begin();
+    InternalFS.remove(BLE_PAIR_MARKER_PATH);
+    if (!paired) return;
+
+    File file = InternalFS.open(BLE_PAIR_MARKER_PATH, FILE_O_WRITE);
+    if (!file) return;
+
+    uint8_t marker = 1u;
+    file.write(&marker, sizeof(marker));
+    file.flush();
+    file.close();
+#else
+    (void)paired;
+#endif
 }
 
 static void updateBatteryLed(uint8_t percentage, uint8_t brightness = 255) {
@@ -101,6 +151,42 @@ static void updateBatteryStatusBlink(unsigned long now) {
     }
 }
 
+static uint8_t triangleBrightness(unsigned long phaseMs, unsigned long periodMs) {
+    const unsigned long halfPeriodMs = periodMs / 2UL;
+    if (phaseMs < halfPeriodMs) {
+        return (uint8_t)((phaseMs * 255UL) / halfPeriodMs);
+    }
+    return (uint8_t)(((periodMs - phaseMs) * 255UL) / halfPeriodMs);
+}
+
+static bool updatePairingLed(unsigned long now) {
+    if (pairingCalmBlinkActive) {
+        if (pairingCalmBlinkStartMs == 0UL) {
+            pairingCalmBlinkStartMs = now;
+        }
+
+        const unsigned long elapsed = now - pairingCalmBlinkStartMs;
+        if (elapsed >= PAIRING_CALM_BLINK_MS) {
+            pairingCalmBlinkActive = false;
+            turnRgbLedOff();
+            return false;
+        }
+
+        const unsigned long phaseMs = elapsed % PAIRING_CALM_BLINK_PERIOD_MS;
+        uint8_t brightness = triangleBrightness(phaseMs, PAIRING_CALM_BLINK_PERIOD_MS);
+        setRgbLedPwm(0, brightness, 0);
+        return true;
+    }
+
+    if (pairingUnlockActive && !connected) {
+        const bool redOn = ((now / (UNPAIRED_RED_BLINK_PERIOD_MS / 2UL)) % 2UL) == 0UL;
+        setRgbLedPwm(redOn ? 255 : 0, 0, 0);
+        return true;
+    }
+
+    return false;
+}
+
 static void startAdvertising() {
     Bluefruit.Advertising.stop();
     Bluefruit.Advertising.clearData();
@@ -118,7 +204,7 @@ static void startAdvertising() {
 }
 
 static void onBleConnect(uint16_t conn_handle) {
-    (void)conn_handle;
+    currentConnHandle = conn_handle;
     connected = true;
     rtt.println("BLE: Connected");
 }
@@ -127,8 +213,26 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)conn_handle;
     (void)reason;
     connected = false;
+    currentConnHandle = BLE_CONN_HANDLE_INVALID;
     rtt.println("BLE: Disconnected");
     startAdvertising();
+}
+
+static void onBleSecured(uint16_t conn_handle) {
+    (void)conn_handle;
+    const bool wasWaitingForFirstPair = pairingUnlockActive || !blePairingKnownPaired;
+
+    pairingUnlockActive = false;
+    blePairingKnownPaired = true;
+    saveBlePairMarker(true);
+
+    if (wasWaitingForFirstPair) {
+        pairingCalmBlinkActive = true;
+        pairingCalmBlinkStartMs = 0UL;
+    }
+
+    batteryBlinkActive = false;
+    rtt.println("BLE: Paired/Secured");
 }
 
 static void applyTrainingTiming(const String &valueRaw) {
@@ -416,6 +520,8 @@ void bluetoothSetup() {
     turnRgbLedOff();
     batteryMonitor.begin();
     updateBatteryReading(millis());
+    blePairingKnownPaired = loadBlePairMarker();
+    pairingUnlockActive = !blePairingKnownPaired;
 
     if (!bleInitialized) {
         Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
@@ -425,6 +531,7 @@ void bluetoothSetup() {
         Bluefruit.setTxPower(4); // dBm
         Bluefruit.Periph.setConnectCallback(onBleConnect);
         Bluefruit.Periph.setDisconnectCallback(onBleDisconnect);
+        Bluefruit.Security.setSecuredCallback(onBleSecured);
 
         gService.begin();
 
@@ -448,7 +555,9 @@ void bluetoothLoop() {
 
     static unsigned long last = 0;
     unsigned long now = millis();
-    updateBatteryStatusBlink(now);
+    if (!updatePairingLed(now)) {
+        updateBatteryStatusBlink(now);
+    }
 
     unsigned long interval = isCalibrating() ? 150UL : 500UL;
     if (now - last < interval) return;
@@ -638,6 +747,26 @@ void bluetoothStopAdvertising() {
 
 bool bluetoothIsConnected() {
     return connected;
+}
+
+void bluetoothUnlockForPairing() {
+    rtt.println("BLE: unlock pairing - clearing bonds");
+
+    batteryBlinkActive = false;
+    pairingCalmBlinkActive = false;
+    pairingCalmBlinkStartMs = 0UL;
+    pairingUnlockActive = true;
+    blePairingKnownPaired = false;
+    saveBlePairMarker(false);
+
+    Bluefruit.Advertising.restartOnDisconnect(true);
+
+    if (currentConnHandle != BLE_CONN_HANDLE_INVALID && Bluefruit.connected(currentConnHandle)) {
+        Bluefruit.disconnect(currentConnHandle);
+    }
+
+    Bluefruit.Periph.clearBonds();
+    startAdvertising();
 }
 
 void bluetoothRequestCalibrationStart() {
