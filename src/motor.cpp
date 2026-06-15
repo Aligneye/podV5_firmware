@@ -11,7 +11,7 @@ static volatile uint32_t g_overrideUntilMs = 0;
 static volatile uint32_t g_calmStartMs = 0;
 static volatile uint16_t g_calmDurationMs = 0;
 
-static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 70;
+static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 50;
 
 // ── Public API ─────────────────────────────────────────────────────────────
 static void applyDuty(uint8_t duty) {
@@ -100,7 +100,11 @@ void motorStartCalmHaptic(uint16_t durationMs) {
 }
 
 void motorCancelCalmHaptic() {
+    bool wasActive = g_calmDurationMs != 0;
     g_calmDurationMs = 0;
+    if (wasActive) {
+        applyDuty(g_dutyWanted);
+    }
 }
 
 void motorUpdate() {

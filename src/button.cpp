@@ -93,6 +93,8 @@ static void handleSingleClick() {
     return;
   }
 
+  playButtonPressHaptic();
+
   // Cycle modes: Training -> Therapy -> Off -> Training
   Mode nextMode = (Mode)((currentMode + 1) % MODE_COUNT);
   setDeviceMode(nextMode);
@@ -147,7 +149,6 @@ static void handleMultiClick() {
     return;
   }
 
-  playButtonPressHaptic();
   bluetoothUnlockForPairing();
 }
 
@@ -169,7 +170,6 @@ static void handleHold() {
 
 void buttonSetup() {
   // Bind callbacks to OneButton
-  btn.attachPress(playButtonPressHaptic);
   btn.attachClick(handleSingleClick);
   btn.attachDoubleClick(handleDoubleClick);
   btn.attachMultiClick(handleMultiClick);
