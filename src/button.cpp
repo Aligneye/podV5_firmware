@@ -201,7 +201,6 @@ void buttonLoop() {
 
     if (currentMode == MODE_TRAINING && !trainingStarted) {
       deviceOn = true;
-      bluetoothStartAdvertising();
       trainingStarted = true;
     }
 
