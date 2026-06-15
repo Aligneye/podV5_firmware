@@ -3,6 +3,7 @@
 #include "therapy.h"
 #include "button.h"
 #include "training.h"
+#include "motor.h"
 #include "device_time.h"
 #include "session_stats.h"
 #include "BatteryMonitor.h"
@@ -27,6 +28,8 @@ static bool pairingUnlockActive = true;
 static bool pairingCalmBlinkActive = false;
 static unsigned long pairingCalmBlinkStartMs = 0;
 static bool blePairingKnownPaired = false;
+static bool connectionSuccessFeedbackPlayed = false;
+static unsigned long connectedSinceMs = 0;
 
 static BLEService gService(BLE_SERVICE_UUID);
 static BLECharacteristic gCharacteristic(BLE_CHARACTERISTIC_UUID);
@@ -47,6 +50,7 @@ static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
 static constexpr uint32_t PAIRING_CALM_BLINK_MS = 5000UL;
 static constexpr uint32_t PAIRING_CALM_BLINK_PERIOD_MS = 2000UL;
+static constexpr uint32_t CONNECTION_SUCCESS_CONFIRM_MS = 650UL;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
@@ -178,7 +182,7 @@ static bool updatePairingLed(unsigned long now) {
         return true;
     }
 
-    if (pairingUnlockActive && !connected) {
+    if (!connected) {
         const bool redOn = ((now / (UNPAIRED_RED_BLINK_PERIOD_MS / 2UL)) % 2UL) == 0UL;
         setRgbLedPwm(redOn ? 255 : 0, 0, 0);
         return true;
@@ -206,6 +210,8 @@ static void startAdvertising() {
 static void onBleConnect(uint16_t conn_handle) {
     currentConnHandle = conn_handle;
     connected = true;
+    connectedSinceMs = millis();
+    connectionSuccessFeedbackPlayed = false;
     rtt.println("BLE: Connected");
 }
 
@@ -214,24 +220,35 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)reason;
     connected = false;
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
+    connectedSinceMs = 0;
+    connectionSuccessFeedbackPlayed = false;
+    pairingCalmBlinkActive = false;
+    pairingCalmBlinkStartMs = 0UL;
+    motorCancelCalmHaptic();
     rtt.println("BLE: Disconnected");
     startAdvertising();
 }
 
-static void onBleSecured(uint16_t conn_handle) {
-    (void)conn_handle;
-    const bool wasWaitingForFirstPair = pairingUnlockActive || !blePairingKnownPaired;
-
-    pairingUnlockActive = false;
-    blePairingKnownPaired = true;
-    saveBlePairMarker(true);
-
-    if (wasWaitingForFirstPair) {
-        pairingCalmBlinkActive = true;
-        pairingCalmBlinkStartMs = 0UL;
+static void playConnectionSuccessFeedback() {
+    if (connectionSuccessFeedbackPlayed) {
+        return;
     }
 
+    connectionSuccessFeedbackPlayed = true;
+    blePairingKnownPaired = true;
+    pairingUnlockActive = false;
+    saveBlePairMarker(true);
+
+    pairingCalmBlinkActive = true;
+    pairingCalmBlinkStartMs = 0UL;
     batteryBlinkActive = false;
+    motorStartCalmHaptic();
+}
+
+static void onBleSecured(uint16_t conn_handle) {
+    (void)conn_handle;
+
+    playConnectionSuccessFeedback();
     rtt.println("BLE: Paired/Secured");
 }
 
@@ -555,6 +572,12 @@ void bluetoothLoop() {
 
     static unsigned long last = 0;
     unsigned long now = millis();
+    if (connected && !connectionSuccessFeedbackPlayed &&
+        connectedSinceMs != 0UL &&
+        (now - connectedSinceMs) >= CONNECTION_SUCCESS_CONFIRM_MS) {
+        playConnectionSuccessFeedback();
+    }
+
     if (!updatePairingLed(now)) {
         updateBatteryStatusBlink(now);
     }

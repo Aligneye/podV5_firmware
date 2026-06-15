@@ -8,6 +8,10 @@ static volatile uint8_t g_dutyApplied = 0;
 static volatile uint8_t g_dutyWanted  = 0;
 static volatile uint8_t g_overrideDuty = 0;
 static volatile uint32_t g_overrideUntilMs = 0;
+static volatile uint32_t g_calmStartMs = 0;
+static volatile uint16_t g_calmDurationMs = 0;
+
+static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 70;
 
 // ── Public API ─────────────────────────────────────────────────────────────
 static void applyDuty(uint8_t duty) {
@@ -32,6 +36,25 @@ static bool overrideActive(uint32_t nowMs) {
     return false;
 }
 
+static bool calmHapticActive(uint32_t nowMs) {
+    if (g_calmDurationMs == 0u) return false;
+    if ((uint32_t)(nowMs - g_calmStartMs) < g_calmDurationMs) return true;
+    g_calmDurationMs = 0u;
+    return false;
+}
+
+static uint8_t calmHapticDuty(uint32_t nowMs) {
+    uint32_t elapsed = nowMs - g_calmStartMs;
+    uint32_t half = g_calmDurationMs / 2u;
+    if (half == 0u) return 0;
+
+    uint32_t level = (elapsed < half)
+        ? (elapsed * CALM_HAPTIC_PEAK_DUTY) / half
+        : ((g_calmDurationMs - elapsed) * CALM_HAPTIC_PEAK_DUTY) / half;
+
+    return (uint8_t)constrain((int)level, 0, CALM_HAPTIC_PEAK_DUTY);
+}
+
 void motorSetup() {
     pinMode(PIN_MOTOR, OUTPUT);
     digitalWrite(PIN_MOTOR, LOW);
@@ -39,6 +62,8 @@ void motorSetup() {
     g_dutyWanted = 0;
     g_overrideDuty = 0;
     g_overrideUntilMs = 0;
+    g_calmStartMs = 0;
+    g_calmDurationMs = 0;
 }
 
 void motorSetDuty(uint8_t duty) {
@@ -62,13 +87,30 @@ void motorOverrideDuty(uint8_t duty, uint16_t durationMs) {
 
     g_overrideDuty = duty;
     g_overrideUntilMs = millis() + durationMs;
+    g_calmDurationMs = 0;
     applyDuty(g_overrideDuty);
+}
+
+void motorStartCalmHaptic(uint16_t durationMs) {
+    if (durationMs == 0u) return;
+    g_overrideUntilMs = 0;
+    g_calmStartMs = millis();
+    g_calmDurationMs = durationMs;
+    applyDuty(0);
+}
+
+void motorCancelCalmHaptic() {
+    g_calmDurationMs = 0;
 }
 
 void motorUpdate() {
     const uint32_t now = millis();
     if (overrideActive(now)) {
         applyDuty(g_overrideDuty);
+        return;
+    }
+    if (calmHapticActive(now)) {
+        applyDuty(calmHapticDuty(now));
         return;
     }
     applyDuty(g_dutyWanted);
