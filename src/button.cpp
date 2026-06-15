@@ -40,9 +40,7 @@ static OneButton btn(PIN_BUTTON, true, true);
 static void playButtonPressHaptic() {
   if (calibrationMotorActive())
     return;
-  // Use a low duty cycle (80) to prevent brownout reset while providing haptic
-  // feedback
-  motorOverrideDuty(150, 125);
+  motorOverrideDuty(130, 70);
 }
 
 void markSubModeChanged() {
@@ -68,6 +66,7 @@ void setDeviceMode(Mode newMode) {
     calibrationRequestCancel();
   }
 
+  motorCancelFeedback();
   motorSetDuty(0);
 
   // 2. Transition to new mode
@@ -92,8 +91,6 @@ static void handleSingleClick() {
     setDeviceMode(MODE_TRAINING);
     return;
   }
-
-  playButtonPressHaptic();
 
   // Cycle modes: Training -> Therapy -> Off -> Training
   Mode nextMode = (Mode)((currentMode + 1) % MODE_COUNT);
@@ -175,6 +172,7 @@ static void handleHold() {
 
 void buttonSetup() {
   // Bind callbacks to OneButton
+  btn.attachPress(playButtonPressHaptic);
   btn.attachClick(handleSingleClick);
   btn.attachDoubleClick(handleDoubleClick);
   btn.attachMultiClick(handleMultiClick);

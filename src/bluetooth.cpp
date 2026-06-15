@@ -25,13 +25,10 @@ static bool connected = false;
 static bool bleInitialized = false;
 static uint16_t currentConnHandle = BLE_CONN_HANDLE_INVALID;
 static bool pairingUnlockActive = true;
-static bool pairingCalmBlinkActive = false;
-static unsigned long pairingCalmBlinkStartMs = 0;
 static bool blePairingKnownPaired = false;
-static bool connectionSuccessFeedbackPlayed = false;
-static bool connectionSuccessFeedbackPending = false;
-static bool connectionSecured = false;
 static bool clearBondsAfterDisconnect = false;
+static bool connectionHapticPending = false;
+static bool connectionHapticPlayed = false;
 static unsigned long connectedSinceMs = 0;
 
 static BLEService gService(BLE_SERVICE_UUID);
@@ -51,9 +48,7 @@ static unsigned long batteryBlinkStartMs = 0;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
-static constexpr uint32_t PAIRING_CALM_BLINK_MS = 5000UL;
-static constexpr uint32_t PAIRING_CALM_BLINK_PERIOD_MS = 2000UL;
-static constexpr uint32_t CONNECTED_SUCCESS_DELAY_MS = 1000UL;
+static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
@@ -158,35 +153,7 @@ static void updateBatteryStatusBlink(unsigned long now) {
     }
 }
 
-static uint8_t triangleBrightness(unsigned long phaseMs, unsigned long periodMs) {
-    const unsigned long halfPeriodMs = periodMs / 2UL;
-    if (phaseMs < halfPeriodMs) {
-        return (uint8_t)((phaseMs * 255UL) / halfPeriodMs);
-    }
-    return (uint8_t)(((periodMs - phaseMs) * 255UL) / halfPeriodMs);
-}
-
-static void playConnectionSuccessFeedback();
-
 static bool updatePairingLed(unsigned long now) {
-    if (pairingCalmBlinkActive) {
-        if (pairingCalmBlinkStartMs == 0UL) {
-            pairingCalmBlinkStartMs = now;
-        }
-
-        const unsigned long elapsed = now - pairingCalmBlinkStartMs;
-        if (elapsed >= PAIRING_CALM_BLINK_MS) {
-            pairingCalmBlinkActive = false;
-            turnRgbLedOff();
-            return false;
-        }
-
-        const unsigned long phaseMs = elapsed % PAIRING_CALM_BLINK_PERIOD_MS;
-        uint8_t brightness = triangleBrightness(phaseMs, PAIRING_CALM_BLINK_PERIOD_MS);
-        setRgbLedPwm(0, brightness, 0);
-        return true;
-    }
-
     if (!connected) {
         const bool redOn = ((now / (UNPAIRED_RED_BLINK_PERIOD_MS / 2UL)) % 2UL) == 0UL;
         setRgbLedPwm(redOn ? 255 : 0, 0, 0);
@@ -215,10 +182,10 @@ static void startAdvertising() {
 static void onBleConnect(uint16_t conn_handle) {
     currentConnHandle = conn_handle;
     connected = true;
-    connectionSuccessFeedbackPlayed = false;
-    connectionSuccessFeedbackPending = true;
-    connectionSecured = false;
+    connectionHapticPending = true;
+    connectionHapticPlayed = false;
     connectedSinceMs = millis();
+    turnRgbLedOff();
     rtt.println("BLE: Connected");
 }
 
@@ -227,13 +194,9 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)reason;
     connected = false;
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
-    connectionSuccessFeedbackPlayed = false;
-    connectionSuccessFeedbackPending = false;
-    connectionSecured = false;
-    connectedSinceMs = 0;
-    pairingCalmBlinkActive = false;
-    pairingCalmBlinkStartMs = 0UL;
-    motorCancelCalmHaptic();
+    connectionHapticPending = false;
+    connectionHapticPlayed = false;
+    connectedSinceMs = 0UL;
     rtt.println("BLE: Disconnected");
 
     if (clearBondsAfterDisconnect) {
@@ -244,28 +207,11 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     startAdvertising();
 }
 
-static void playConnectionSuccessFeedback() {
-    if (connectionSuccessFeedbackPlayed) {
-        return;
-    }
-
-    connectionSuccessFeedbackPlayed = true;
-    connectionSuccessFeedbackPending = false;
-    blePairingKnownPaired = true;
-    pairingUnlockActive = false;
-    saveBlePairMarker(true);
-
-    pairingCalmBlinkActive = true;
-    pairingCalmBlinkStartMs = 0UL;
-    batteryBlinkActive = false;
-    motorStartCalmHaptic();
-}
-
 static void onBleSecured(uint16_t conn_handle) {
     (void)conn_handle;
-
-    connectionSecured = true;
-    connectionSuccessFeedbackPending = true;
+    blePairingKnownPaired = true;
+    pairingUnlockActive = false;
+    connectionHapticPending = true;
     rtt.println("BLE: Paired/Secured");
 }
 
@@ -589,17 +535,14 @@ void bluetoothLoop() {
 
     static unsigned long last = 0;
     unsigned long now = millis();
-    if (connected && connectionSuccessFeedbackPending && !connectionSuccessFeedbackPlayed &&
-        currentConnHandle != BLE_CONN_HANDLE_INVALID) {
-        BLEConnection *conn = Bluefruit.Connection(currentConnHandle);
-        if (conn && conn->secured()) {
-            connectionSecured = true;
-        }
-
-        if (connectionSecured ||
-            (connectedSinceMs != 0UL && (now - connectedSinceMs) >= CONNECTED_SUCCESS_DELAY_MS)) {
-            playConnectionSuccessFeedback();
-        }
+    if (connected && connectionHapticPending && !connectionHapticPlayed &&
+        connectedSinceMs != 0UL &&
+        (now - connectedSinceMs) >= CONNECTION_HAPTIC_DELAY_MS) {
+        connectionHapticPending = false;
+        connectionHapticPlayed = true;
+        motorCancelFeedback();
+        motorSetDuty(0);
+        motorOverrideDuty(150, 125);
     }
 
     if (!updatePairingLed(now)) {
@@ -800,15 +743,12 @@ void bluetoothUnlockForPairing() {
     rtt.println("BLE: unlock pairing - clearing bonds");
 
     batteryBlinkActive = false;
-    pairingCalmBlinkActive = false;
-    pairingCalmBlinkStartMs = 0UL;
     pairingUnlockActive = true;
     blePairingKnownPaired = false;
-    connectionSuccessFeedbackPlayed = false;
-    connectionSuccessFeedbackPending = false;
-    connectionSecured = false;
-    connectedSinceMs = 0;
     clearBondsAfterDisconnect = false;
+    connectionHapticPending = false;
+    connectionHapticPlayed = false;
+    connectedSinceMs = 0UL;
     saveBlePairMarker(false);
 
     Bluefruit.Advertising.restartOnDisconnect(true);

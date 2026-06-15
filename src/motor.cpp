@@ -77,13 +77,6 @@ void motorSetDuty(uint8_t duty) {
 
 void motorOverrideDuty(uint8_t duty, uint16_t durationMs) {
     if (durationMs == 0u) return;
-    const uint32_t now = millis();
-
-    // If an override is already active, turn off the motor first to reset the vibration feel.
-    if (overrideActive(now)) {
-        applyDuty(0);
-        delay(30); // 30ms gap to let the motor spin down
-    }
 
     g_overrideDuty = duty;
     g_overrideUntilMs = millis() + durationMs;
@@ -105,6 +98,13 @@ void motorCancelCalmHaptic() {
     if (wasActive) {
         applyDuty(g_dutyWanted);
     }
+}
+
+void motorCancelFeedback() {
+    g_overrideUntilMs = 0;
+    g_overrideDuty = 0;
+    g_calmDurationMs = 0;
+    applyDuty(g_dutyWanted);
 }
 
 void motorUpdate() {
