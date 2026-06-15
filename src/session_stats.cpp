@@ -381,9 +381,9 @@ static void finalizeTherapyRecord() {
         int printLen = getTherapyPatternSequence(printSeq, MAX_THERAPY_PATTERNS);
         if (printLen > 0) {
             for (int i = 0; i < printLen; i++) {
-                uint32_t patDur = 60u;
+                uint32_t patDur = (uint32_t)(THERAPY_PATTERN_MS/1000UL);
                 if (i == printLen - 1) {
-                    uint32_t consumed = 60u * (uint32_t)(printLen - 1);
+                    uint32_t consumed = (uint32_t)(THERAPY_PATTERN_MS / 1000UL) * (uint32_t)(printLen - 1);
                     patDur = (durationSec > consumed) ? (durationSec - consumed) : 0u;
                     if (patDur == 0u) patDur = (uint32_t)(durationSec % 60u);
                     if (patDur == 0u) patDur = 60u;

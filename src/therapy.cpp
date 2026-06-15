@@ -20,7 +20,7 @@ static unsigned long patternStartMs = 0;
 static unsigned long lastTickMs = 0;
 static bool patternsInitialized = false;
 
-#define MAX_THERAPY_PATTERNS 20
+#define MAX_THERAPY_PATTERNS 30
 static int patternSequence[MAX_THERAPY_PATTERNS];
 static int totalPatterns = 0;
 int currentPatternIndex = 0;
@@ -70,19 +70,30 @@ const char* getPatternNameByIndex(int idx) {
 static void initializePatternSequence() {
     patternsInitialized = true;
     currentPatternIndex = 0;
-    patternSequence[0] = PATTERN_MUSCLE_ACTIVATION;
 
-    const int minutes = (int)(therapyDurationMs / 60000UL);
-    totalPatterns = (minutes > MAX_THERAPY_PATTERNS) ? MAX_THERAPY_PATTERNS : minutes;
-    if (totalPatterns <= 0) totalPatterns = 1;
+    const unsigned long patternMs = THERAPY_PATTERN_MS;
+    totalPatterns = (int)((therapyDurationMs + patternMs - 1) / patternMs);
 
-    for (int i = 1; i < totalPatterns; i++) {
-        patternSequence[i] = random(1, PATTERN_COUNT);
+    if (totalPatterns > MAX_THERAPY_PATTERNS) {
+        totalPatterns = MAX_THERAPY_PATTERNS;
+    }
+
+    if (totalPatterns <= 0) {
+        totalPatterns = 1;
+    }
+
+    for (int i = 0; i < totalPatterns; i++) {
+        if (i < PATTERN_COUNT) {
+            patternSequence[i] = i;
+        } else {
+            patternSequence[i] = random(0, PATTERN_COUNT);
+        }
     }
 
     rtt.print("Pattern sequence initialized: ");
     rtt.print(totalPatterns);
     rtt.println(" patterns");
+
     for (int i = 0; i < totalPatterns; i++) {
         rtt.print("  Pattern ");
         rtt.print(i + 1);
@@ -308,7 +319,7 @@ void therapyLoop() {
     }
 
     unsigned long patternElapsed = now - patternStartMs;
-    if (patternElapsed >= 60000UL) {
+    if (patternElapsed >= THERAPY_PATTERN_MS) {
         currentPatternIndex++;
         patternStartMs = now;
         patternElapsed = 0;

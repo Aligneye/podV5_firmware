@@ -4,7 +4,7 @@
 
 static const int MAX_SESSIONS = 120;
 static const uint8_t MAX_POSTURE_EVENTS = 64u;
-static const uint8_t MAX_THERAPY_PATTERNS = 20u;
+static const uint8_t MAX_THERAPY_PATTERNS = 30u;
 
 static const char* SESSION_FILE = "/sessions.dat";
 static const char* SESSION_EVENTS_FILE = "/sess_ev.dat";
