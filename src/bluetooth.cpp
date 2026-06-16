@@ -642,6 +642,43 @@ void bluetoothLoop() {
         modeString = "OFF";
     }
 
+    if (currentMode == MODE_THERAPY && !calibrating) {
+        updateBatteryReading(now);
+
+        unsigned long therapyRemainingSec = (therapyGetRemainingMs() + 999UL) / 1000UL;
+        unsigned long therapyElapsedSec = therapyGetElapsedMs() / 1000UL;
+
+        char therapyJsonBuffer[256];
+        snprintf(therapyJsonBuffer, sizeof(therapyJsonBuffer),
+            "{\"mode\":\"%s\",\"sub_mode\":\"%s\",\"angle\":%.2f,"
+            "\"battery_percentage\":%d,"
+            "\"t_patt\":\"%s\",\"t_next\":\"%s\",\"t_elap\":%lu,\"t_rem\":%lu,"
+            "\"t_lvl\":%d,\"t_cur\":%d,\"t_total\":%d}",
+            modeString,
+            subModeStr,
+            currentAngle,
+            batteryPercentage,
+            therapyGetCurrentPatternName(),
+            therapyGetNextPatternName(),
+            therapyElapsedSec,
+            therapyRemainingSec,
+            therapyIntensityLevel,
+            currentPatternIndex,
+            getTherapyTotalPatternCount()
+        );
+
+        if (connected) {
+            static unsigned long lastTherapyPayloadLogMs = 0;
+            if ((now - lastTherapyPayloadLogMs) >= 2000UL) {
+                lastTherapyPayloadLogMs = now;
+                rtt.print("BLE: therapy status bytes=");
+                rtt.println(strlen(therapyJsonBuffer));
+            }
+            pCharacteristic->notify(therapyJsonBuffer);
+        }
+        return;
+    }
+
     offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
         "{\"mode\":\"%s\",\"sub_mode\":\"%s\",\"angle\":%.2f,"
         "\"raw_x_g\":%.2f,\"raw_y_g\":%.2f,\"raw_z_g\":%.2f,"
