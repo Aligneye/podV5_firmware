@@ -8,6 +8,7 @@
 #include "session_stats.h"
 #include "BatteryMonitor.h"
 #include <bluefruit.h>
+#include <ble_hci.h>
 #if __has_include(<InternalFileSystem.h>)
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
@@ -53,6 +54,27 @@ static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
 static constexpr uint8_t DISCONNECTION_HAPTIC_DUTY = 150;
 static constexpr uint16_t DISCONNECTION_HAPTIC_MS = 250;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
+
+static const char* bleDisconnectReasonText(uint8_t reason) {
+    switch (reason) {
+        case BLE_HCI_CONNECTION_TIMEOUT:
+            return "timeout";
+        case BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION:
+            return "remote_user";
+        case BLE_HCI_REMOTE_DEV_TERMINATION_DUE_TO_LOW_RESOURCES:
+            return "remote_low_resources";
+        case BLE_HCI_REMOTE_DEV_TERMINATION_DUE_TO_POWER_OFF:
+            return "remote_power_off";
+        case BLE_HCI_LOCAL_HOST_TERMINATED_CONNECTION:
+            return "local_host";
+        case BLE_HCI_CONN_INTERVAL_UNACCEPTABLE:
+            return "conn_interval_unacceptable";
+        case BLE_HCI_CONN_TERMINATED_DUE_TO_MIC_FAILURE:
+            return "mic_failure";
+        default:
+            return "unknown";
+    }
+}
 
 static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
     analogWrite(PIN_LED_RED, 255 - red);
@@ -195,14 +217,17 @@ static void onBleConnect(uint16_t conn_handle) {
 
 static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)conn_handle;
-    (void)reason;
     connected = false;
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
     disconnectionHapticPending = true;
     connectedSinceMs = 0UL;
-    rtt.println("BLE: Disconnected");
+    rtt.print("BLE: Disconnected reason=0x");
+    rtt.print(reason, HEX);
+    rtt.print(" (");
+    rtt.print(bleDisconnectReasonText(reason));
+    rtt.println(")");
 
     if (clearBondsAfterDisconnect) {
         clearBondsAfterDisconnect = false;
@@ -704,6 +729,12 @@ void bluetoothLoop() {
 
     // Send if connected
     if (connected) {
+        static unsigned long lastBlePayloadLogMs = 0;
+        if (currentMode == MODE_THERAPY && (now - lastBlePayloadLogMs) >= 2000UL) {
+            lastBlePayloadLogMs = now;
+            rtt.print("BLE: therapy status bytes=");
+            rtt.println(strlen(jsonBuffer));
+        }
         pCharacteristic->write(jsonBuffer);
         pCharacteristic->notify(jsonBuffer);
     }
