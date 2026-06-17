@@ -31,6 +31,7 @@ static bool clearBondsAfterDisconnect = false;
 static bool connectionHapticPending = false;
 static bool connectionHapticPlayed = false;
 static bool disconnectionHapticPending = false;
+static bool forceTelemetrySync = false;
 static unsigned long connectedSinceMs = 0;
 
 static BLEService gService(BLE_SERVICE_UUID);
@@ -210,6 +211,7 @@ static void onBleConnect(uint16_t conn_handle) {
     connectionHapticPending = true;
     connectionHapticPlayed = false;
     disconnectionHapticPending = false;
+    forceTelemetrySync = true;
     connectedSinceMs = millis();
     turnRgbLedOff();
     rtt.println("BLE: Connected");
@@ -563,7 +565,6 @@ void bluetoothSetup() {
 void bluetoothLoop() {
     if (!pCharacteristic) return;
 
-    static unsigned long last = 0;
     unsigned long now = millis();
     if (connected && connectionHapticPending && !connectionHapticPlayed &&
         connectedSinceMs != 0UL &&
@@ -585,15 +586,6 @@ void bluetoothLoop() {
         updateBatteryStatusBlink(now);
     }
 
-    unsigned long interval = isCalibrating() ? 150UL : 500UL;
-    if (now - last < interval) return;
-    last = now;
-
-    // Calculate individual angles
-    float ang_x = atan2(rawX, sqrt(rawY * rawY + rawZ * rawZ)) * 180.0 / PI;
-    float ang_y = atan2(rawY, sqrt(rawX * rawX + rawZ * rawZ)) * 180.0 / PI;
-    float ang_z = atan2(sqrt(rawX * rawX + rawY * rawY), rawZ) * 180.0 / PI;
-
     // Determine submode string
     char subModeStr[16];
     if (currentMode == MODE_TRAINING) {
@@ -610,28 +602,8 @@ void bluetoothLoop() {
         strcpy(subModeStr, "INSTANT");
     }
 
-    // JSON Construction
-    char jsonBuffer[512];
-    int offset = 0;
-
-    bool calibrating = isCalibrating();
-    unsigned long calibElapsedMs = getCalibrationElapsedMs();
-    unsigned long calibTotalMs = getCalibrationTotalMs();
-    const char *calibResult = getCalibrationResult();
     const OrientationProfile *activeProfile = getActiveProfile();
-    const int activeProfileIndex = getActiveProfileIndex();
     const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
-    const int profileIndexForApp = activeProfile ? (activeProfileIndex + 1) : 0;
-    char profileList[160] = "";
-    int profileListOffset = 0;
-    for (uint8_t i = 0; i < getProfileCount() && profileListOffset < (int)sizeof(profileList); i++) {
-        const OrientationProfile *profile = getProfile(i);
-        if (!profile) continue;
-        profileListOffset += snprintf(profileList + profileListOffset,
-                                      sizeof(profileList) - profileListOffset,
-                                      (i == 0) ? "%s" : "|%s",
-                                      profile->name);
-    }
 
     const char *modeString = "TRACKING";
     if (currentMode == MODE_TRAINING) {
@@ -642,138 +614,71 @@ void bluetoothLoop() {
         modeString = "OFF";
     }
 
-    if (currentMode == MODE_THERAPY && !calibrating) {
-        updateBatteryReading(now);
-
-        unsigned long therapyRemainingSec = (therapyGetRemainingMs() + 999UL) / 1000UL;
-        unsigned long therapyElapsedSec = therapyGetElapsedMs() / 1000UL;
-
-        char therapyJsonBuffer[256];
-        snprintf(therapyJsonBuffer, sizeof(therapyJsonBuffer),
-            "{\"mode\":\"%s\",\"sub_mode\":\"%s\",\"angle\":%.2f,"
-            "\"battery_percentage\":%d,"
-            "\"t_patt\":\"%s\",\"t_next\":\"%s\",\"t_elap\":%lu,\"t_rem\":%lu,"
-            "\"t_lvl\":%d,\"t_cur\":%d,\"t_total\":%d}",
-            modeString,
-            subModeStr,
-            currentAngle,
-            batteryPercentage,
-            therapyGetCurrentPatternName(),
-            therapyGetNextPatternName(),
-            therapyElapsedSec,
-            therapyRemainingSec,
-            therapyIntensityLevel,
-            currentPatternIndex,
-            getTherapyTotalPatternCount()
-        );
-
-        if (connected) {
-            static unsigned long lastTherapyPayloadLogMs = 0;
-            if ((now - lastTherapyPayloadLogMs) >= 2000UL) {
-                lastTherapyPayloadLogMs = now;
-                rtt.print("BLE: therapy status bytes=");
-                rtt.println(strlen(therapyJsonBuffer));
-            }
-            pCharacteristic->notify(therapyJsonBuffer);
-        }
-        return;
-    }
-
-    offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-        "{\"mode\":\"%s\",\"sub_mode\":\"%s\",\"angle\":%.2f,"
-        "\"raw_x_g\":%.2f,\"raw_y_g\":%.2f,\"raw_z_g\":%.2f,"
-        "\"angle_x\":%.1f,\"angle_y\":%.1f,\"angle_z\":%.1f,"
-        "\"cal_y\":%.2f,\"cal_z\":%.2f,"
-        "\"is_calibrating\":%s,\"c_phase\":\"%s\",\"c_elap\":%lu,\"c_tot\":%lu,",
-        modeString,
-        subModeStr, currentAngle,
-        rawX, rawY, rawZ,
-        ang_x, ang_y, ang_z,
-        Y_ORIGIN, Z_ORIGIN,
-        calibrating ? "true" : "false", getCalibrationPhase(), calibElapsedMs, calibTotalMs
-    );
-
-    if (calibResult[0] != '\0' && offset < sizeof(jsonBuffer)) {
-        offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-            "\"calibration_result\":\"%s\",", calibResult);
-    }
-
     updateBatteryReading(now);
 
-    if (offset < sizeof(jsonBuffer)) {
-        offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-            "\"posture\":\"%s\",\"is_bad_posture\":%s,\"battery_voltage\":%.2f,\"battery_percentage\":%d",
-            postureText, isBadPosture ? "true" : "false", batteryVoltage, batteryPercentage
-        );
-    }
+    const char *appPosture =
+        (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
+            ? "BAD POSTURE"
+            : "GOOD POSTURE";
 
-    if (offset < sizeof(jsonBuffer)) {
-        offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-            ",\"difficulty_deg\":%d,\"profile\":\"%s\",\"profile_index\":%d,\"profile_count\":%u,\"profiles\":\"%s\"",
-            (int)kBadPostureDeg,
-            profileName,
-            profileIndexForApp,
-            (unsigned)getProfileCount(),
-            profileList
-        );
-    }
-
-    if (isTrainingActive() && offset < sizeof(jsonBuffer)) {
-        offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-            ",\"s_id\":%lu,\"s_elap\":%lu,\"s_start\":%lu,\"s_bad\":%lu",
-            (unsigned long)getTrainingSessionNumber(),
-            (unsigned long)getTrainingSessionDurationSec(),
-            (unsigned long)getActiveTrainingStartEpoch(),
-            (unsigned long)getTrainingSessionBadPostureCount()
-        );
-    } else if (isTherapyActive() && offset < sizeof(jsonBuffer)) {
-        offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-            ",\"s_id\":%lu,\"s_elap\":%lu,\"s_start\":%lu,\"s_bad\":0",
-            (unsigned long)getTherapySessionNumber(),
-            (unsigned long)getTherapySessionDurationSec(),
-            (unsigned long)getActiveTherapyStartEpoch()
-        );
-    }
-
-    if (currentMode == MODE_THERAPY && offset < sizeof(jsonBuffer)) {
-        unsigned long therapyRemainingSec = (therapyGetRemainingMs() + 999UL) / 1000UL;
-        unsigned long therapyElapsedSec = therapyGetElapsedMs() / 1000UL;
-        char seqStr[64] = "";
-        int seqOffset = 0;
-        uint8_t seq[20];
-        int seqLen = getTherapyPatternSequence(seq, 20);
-        for (int i = 0; i < seqLen; i++) {
-            seqOffset += snprintf(seqStr + seqOffset, sizeof(seqStr) - seqOffset,
-                                  (i == 0) ? "%d" : ",%d", seq[i]);
-        }
-        offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
-            ",\"t_patt\":\"%s\",\"t_next\":\"%s\",\"t_elap\":%lu,\"t_rem\":%lu,\"t_lvl\":%d,\"t_seq\":\"%s\",\"t_cur\":%d,\"t_total\":%d",
-            therapyGetCurrentPatternName(), therapyGetNextPatternName(),
-            therapyElapsedSec, therapyRemainingSec,
-            therapyIntensityLevel,
-            seqStr,
-            currentPatternIndex,
-            getTherapyTotalPatternCount()
-        );
-    }
-
-    if (offset < sizeof(jsonBuffer)) {
-        snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset, "}");
-    } else {
-        jsonBuffer[sizeof(jsonBuffer) - 2] = '}';
-        jsonBuffer[sizeof(jsonBuffer) - 1] = '\0';
-    }
-
-    // Send if connected
     if (connected) {
-        static unsigned long lastBlePayloadLogMs = 0;
-        if (currentMode == MODE_THERAPY && (now - lastBlePayloadLogMs) >= 2000UL) {
-            lastBlePayloadLogMs = now;
-            rtt.print("BLE: therapy status bytes=");
-            rtt.println(strlen(jsonBuffer));
+        static unsigned long lastLiveSend = 0;
+        static unsigned long lastTelemetrySend = 0;
+        static bool telemetryCacheValid = false;
+        static char lastMode[12] = "";
+        static char lastSubMode[16] = "";
+        static char lastProfile[32] = "";
+        static uint8_t lastBatteryPercentage = 255;
+
+        bool telemetryChanged = forceTelemetrySync || !telemetryCacheValid ||
+            strcmp(lastMode, modeString) != 0 ||
+            strcmp(lastSubMode, subModeStr) != 0 ||
+            strcmp(lastProfile, profileName) != 0 ||
+            lastBatteryPercentage != batteryPercentage;
+
+        if (!isCalibrating() &&
+            (telemetryChanged || (now - lastTelemetrySend) >= 5000UL)) {
+            char telemetryBuffer[128];
+            snprintf(telemetryBuffer, sizeof(telemetryBuffer),
+                "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
+                "\"profile\":\"%s\",\"battery\":%u}",
+                modeString,
+                subModeStr,
+                profileName,
+                (unsigned)batteryPercentage
+            );
+            pCharacteristic->write(telemetryBuffer);
+            pCharacteristic->notify(telemetryBuffer);
+#if ALIGN_RTT_JSON_LOG
+            rtt.println(telemetryBuffer);
+#endif
+
+            strncpy(lastMode, modeString, sizeof(lastMode) - 1);
+            lastMode[sizeof(lastMode) - 1] = '\0';
+            strncpy(lastSubMode, subModeStr, sizeof(lastSubMode) - 1);
+            lastSubMode[sizeof(lastSubMode) - 1] = '\0';
+            strncpy(lastProfile, profileName, sizeof(lastProfile) - 1);
+            lastProfile[sizeof(lastProfile) - 1] = '\0';
+            lastBatteryPercentage = batteryPercentage;
+            telemetryCacheValid = true;
+            forceTelemetrySync = false;
+            lastTelemetrySend = now;
         }
-        pCharacteristic->write(jsonBuffer);
-        pCharacteristic->notify(jsonBuffer);
+
+        if ((now - lastLiveSend) >= 150UL) {
+            char liveBuffer[64];
+            snprintf(liveBuffer, sizeof(liveBuffer),
+                "{\"t\":\"L\",\"angle\":%.2f,\"posture\":\"%s\"}",
+                currentAngle,
+                appPosture
+            );
+            pCharacteristic->write(liveBuffer);
+            pCharacteristic->notify(liveBuffer);
+#if ALIGN_RTT_JSON_LOG
+            rtt.println(liveBuffer);
+#endif
+            lastLiveSend = now;
+        }
     }
 
     // Clean human-readable RTT status for day-to-day debugging.
@@ -797,11 +702,6 @@ void bluetoothLoop() {
     }
 #endif
 
-#if ALIGN_RTT_JSON_LOG
-    if (!isCalibrating()) {
-        rtt.println(jsonBuffer);
-    }
-#endif
 }
 
 void bluetoothStartAdvertising() {
