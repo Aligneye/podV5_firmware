@@ -13,7 +13,7 @@ extern RTTStream rtt;
 enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };
 static CalibState calibState = CALIB_STATE_IDLE;
 
-static constexpr uint32_t CALIB_GET_READY_MS       = 3000UL;
+static constexpr uint32_t CALIB_GET_READY_MS       = 2000UL;
 static constexpr uint32_t CALIB_HOLD_MS            = 5000UL;
 static constexpr uint32_t CALIB_TOTAL_MS           = CALIB_GET_READY_MS + CALIB_HOLD_MS;
 static constexpr uint32_t CALIB_RESULT_BROADCAST_MS = 4000UL;
@@ -363,7 +363,7 @@ void startCalibration() {
     s_lastSampleTime = millis();
 
     rtt.println("CALIBRATION: START");
-    rtt.println("CALIBRATION: GET READY - 3 sec");
+    rtt.println("CALIBRATION: GET READY - 2 sec");
 }
 
 void cancelCalibration() {

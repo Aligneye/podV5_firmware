@@ -8,6 +8,7 @@
 #include "session_stats.h"
 #include "BatteryMonitor.h"
 #include <bluefruit.h>
+#include <ble_hci.h>
 #if __has_include(<InternalFileSystem.h>)
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
@@ -29,6 +30,7 @@ static bool blePairingKnownPaired = false;
 static bool clearBondsAfterDisconnect = false;
 static bool connectionHapticPending = false;
 static bool connectionHapticPlayed = false;
+static bool disconnectionHapticPending = false;
 static unsigned long connectedSinceMs = 0;
 
 static BLEService gService(BLE_SERVICE_UUID);
@@ -49,7 +51,30 @@ static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
 static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
+static constexpr uint8_t DISCONNECTION_HAPTIC_DUTY = 150;
+static constexpr uint16_t DISCONNECTION_HAPTIC_MS = 250;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
+
+static const char* bleDisconnectReasonText(uint8_t reason) {
+    switch (reason) {
+        case BLE_HCI_CONNECTION_TIMEOUT:
+            return "timeout";
+        case BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION:
+            return "remote_user";
+        case BLE_HCI_REMOTE_DEV_TERMINATION_DUE_TO_LOW_RESOURCES:
+            return "remote_low_resources";
+        case BLE_HCI_REMOTE_DEV_TERMINATION_DUE_TO_POWER_OFF:
+            return "remote_power_off";
+        case BLE_HCI_LOCAL_HOST_TERMINATED_CONNECTION:
+            return "local_host";
+        case BLE_HCI_CONN_INTERVAL_UNACCEPTABLE:
+            return "conn_interval_unacceptable";
+        case BLE_HCI_CONN_TERMINATED_DUE_TO_MIC_FAILURE:
+            return "mic_failure";
+        default:
+            return "unknown";
+    }
+}
 
 static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
     analogWrite(PIN_LED_RED, 255 - red);
@@ -184,6 +209,7 @@ static void onBleConnect(uint16_t conn_handle) {
     connected = true;
     connectionHapticPending = true;
     connectionHapticPlayed = false;
+    disconnectionHapticPending = false;
     connectedSinceMs = millis();
     turnRgbLedOff();
     rtt.println("BLE: Connected");
@@ -191,13 +217,17 @@ static void onBleConnect(uint16_t conn_handle) {
 
 static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)conn_handle;
-    (void)reason;
     connected = false;
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
+    disconnectionHapticPending = true;
     connectedSinceMs = 0UL;
-    rtt.println("BLE: Disconnected");
+    rtt.print("BLE: Disconnected reason=0x");
+    rtt.print(reason, HEX);
+    rtt.print(" (");
+    rtt.print(bleDisconnectReasonText(reason));
+    rtt.println(")");
 
     if (clearBondsAfterDisconnect) {
         clearBondsAfterDisconnect = false;
@@ -544,6 +574,12 @@ void bluetoothLoop() {
         motorSetDuty(0);
         motorOverrideDuty(150, 125);
     }
+    if (disconnectionHapticPending && !calibrationMotorActive()) {
+        disconnectionHapticPending = false;
+        motorCancelFeedback();
+        motorSetDuty(0);
+        motorOverrideDuty(DISCONNECTION_HAPTIC_DUTY, DISCONNECTION_HAPTIC_MS);
+    }
 
     if (!updatePairingLed(now)) {
         updateBatteryStatusBlink(now);
@@ -604,6 +640,43 @@ void bluetoothLoop() {
         modeString = "THERAPY";
     } else if (currentMode == MODE_OFF) {
         modeString = "OFF";
+    }
+
+    if (currentMode == MODE_THERAPY && !calibrating) {
+        updateBatteryReading(now);
+
+        unsigned long therapyRemainingSec = (therapyGetRemainingMs() + 999UL) / 1000UL;
+        unsigned long therapyElapsedSec = therapyGetElapsedMs() / 1000UL;
+
+        char therapyJsonBuffer[256];
+        snprintf(therapyJsonBuffer, sizeof(therapyJsonBuffer),
+            "{\"mode\":\"%s\",\"sub_mode\":\"%s\",\"angle\":%.2f,"
+            "\"battery_percentage\":%d,"
+            "\"t_patt\":\"%s\",\"t_next\":\"%s\",\"t_elap\":%lu,\"t_rem\":%lu,"
+            "\"t_lvl\":%d,\"t_cur\":%d,\"t_total\":%d}",
+            modeString,
+            subModeStr,
+            currentAngle,
+            batteryPercentage,
+            therapyGetCurrentPatternName(),
+            therapyGetNextPatternName(),
+            therapyElapsedSec,
+            therapyRemainingSec,
+            therapyIntensityLevel,
+            currentPatternIndex,
+            getTherapyTotalPatternCount()
+        );
+
+        if (connected) {
+            static unsigned long lastTherapyPayloadLogMs = 0;
+            if ((now - lastTherapyPayloadLogMs) >= 2000UL) {
+                lastTherapyPayloadLogMs = now;
+                rtt.print("BLE: therapy status bytes=");
+                rtt.println(strlen(therapyJsonBuffer));
+            }
+            pCharacteristic->notify(therapyJsonBuffer);
+        }
+        return;
     }
 
     offset += snprintf(jsonBuffer + offset, sizeof(jsonBuffer) - offset,
@@ -693,6 +766,12 @@ void bluetoothLoop() {
 
     // Send if connected
     if (connected) {
+        static unsigned long lastBlePayloadLogMs = 0;
+        if (currentMode == MODE_THERAPY && (now - lastBlePayloadLogMs) >= 2000UL) {
+            lastBlePayloadLogMs = now;
+            rtt.print("BLE: therapy status bytes=");
+            rtt.println(strlen(jsonBuffer));
+        }
         pCharacteristic->write(jsonBuffer);
         pCharacteristic->notify(jsonBuffer);
     }
@@ -748,6 +827,7 @@ void bluetoothUnlockForPairing() {
     clearBondsAfterDisconnect = false;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
+    disconnectionHapticPending = false;
     connectedSinceMs = 0UL;
     saveBlePairMarker(false);
 
