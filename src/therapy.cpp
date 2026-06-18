@@ -119,21 +119,17 @@ static void printTick(unsigned long now) {
 }
 
 static void patternMuscleActivation(unsigned long e) {
-    if (e <= 60000UL) {
-        float pct = 30.0f + ((float)e / 60000.0f) * 70.0f;
-        motorSetDuty(constrain((int)((pct / 100.0f) * 255.0f), 0, 255));
-    } else {
-        motorSetDuty(0);
-    }
+    const unsigned long span = THERAPY_PATTERN_MS;
+    const unsigned long capped = (e < span) ? e : span;
+    float pct = 30.0f + ((float)capped / (float)span) * 70.0f;
+    motorSetDuty(constrain((int)((pct / 100.0f) * 255.0f), 0, 255));
 }
 
 static void patternReverseRamp(unsigned long e) {
-    if (e <= 60000UL) {
-        float pct = 100.0f - ((float)e / 60000.0f) * 70.0f;
-        motorSetDuty(constrain((int)((pct / 100.0f) * 255.0f), 0, 255));
-    } else {
-        motorSetDuty(0);
-    }
+    const unsigned long span = THERAPY_PATTERN_MS;
+    const unsigned long capped = (e < span) ? e : span;
+    float pct = 100.0f - ((float)capped / (float)span) * 70.0f;
+    motorSetDuty(constrain((int)((pct / 100.0f) * 255.0f), 0, 255));
 }
 
 static void patternRampPattern(unsigned long e) {
