@@ -182,12 +182,7 @@ static void updateBatteryStatusBlink(unsigned long now) {
 }
 
 static bool updatePairingLed(unsigned long now) {
-    if (!connected) {
-        const bool redOn = ((now / (UNPAIRED_RED_BLINK_PERIOD_MS / 2UL)) % 2UL) == 0UL;
-        setRgbLedPwm(redOn ? 255 : 0, 0, 0);
-        return true;
-    }
-
+    (void)now;
     return false;
 }
 
