@@ -32,6 +32,8 @@ static bool connectionHapticPending = false;
 static bool connectionHapticPlayed = false;
 static bool disconnectionHapticPending = false;
 static bool forceTelemetrySync = false;
+static bool forceLiveSync = false;
+static unsigned long lastLiveSendMs = 0;
 static unsigned long connectedSinceMs = 0;
 
 static BLEService gService(BLE_SERVICE_UUID);
@@ -212,6 +214,8 @@ static void onBleConnect(uint16_t conn_handle) {
     connectionHapticPlayed = false;
     disconnectionHapticPending = false;
     forceTelemetrySync = true;
+    forceLiveSync = true;
+    lastLiveSendMs = 0;
     connectedSinceMs = millis();
     turnRgbLedOff();
     rtt.println("BLE: Connected");
@@ -224,6 +228,7 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     connectionHapticPending = false;
     connectionHapticPlayed = false;
     disconnectionHapticPending = true;
+    forceLiveSync = false;
     connectedSinceMs = 0UL;
     rtt.print("BLE: Disconnected reason=0x");
     rtt.print(reason, HEX);
@@ -616,13 +621,17 @@ void bluetoothLoop() {
 
     updateBatteryReading(now);
 
+    if (connected && currentMode == MODE_TRAINING && !isCalibrating() &&
+        (forceLiveSync || (now - lastLiveSendMs) >= 150UL)) {
+        updatePostureAngle();
+    }
+
     const char *appPosture =
         (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
             ? "BAD POSTURE"
             : "GOOD POSTURE";
 
     if (connected) {
-        static unsigned long lastLiveSend = 0;
         static unsigned long lastTelemetrySend = 0;
         static bool telemetryCacheValid = false;
         static char lastMode[12] = "";
@@ -665,7 +674,7 @@ void bluetoothLoop() {
             lastTelemetrySend = now;
         }
 
-        if ((now - lastLiveSend) >= 150UL) {
+        if (forceLiveSync || (now - lastLiveSendMs) >= 150UL) {
             char liveBuffer[64];
             snprintf(liveBuffer, sizeof(liveBuffer),
                 "{\"t\":\"L\",\"angle\":%.2f,\"posture\":\"%s\"}",
@@ -677,7 +686,8 @@ void bluetoothLoop() {
 #if ALIGN_RTT_JSON_LOG
             rtt.println(liveBuffer);
 #endif
-            lastLiveSend = now;
+            forceLiveSync = false;
+            lastLiveSendMs = now;
         }
     }
 
