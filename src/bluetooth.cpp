@@ -709,6 +709,32 @@ void bluetoothLoop() {
 
 }
 
+void notifyCalibrationStatus(bool started, const char* status, const char* profileName, float refX, float refY, float refZ) {
+    if (!pCharacteristic || !connected) {
+        return;
+    }
+
+    char safeProfileName[32];
+    if (!profileName || profileName[0] == '\0') {
+        safeProfileName[0] = '\0';
+    } else {
+        strncpy(safeProfileName, profileName, sizeof(safeProfileName) - 1);
+        safeProfileName[sizeof(safeProfileName) - 1] = '\0';
+    }
+
+    char payload[160];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"C\",\"started\":%s,\"status\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"profile\":\"%s\"}",
+             started ? "true" : "false",
+             (status && status[0] != '\0') ? status : "unknown",
+             refX,
+             refY,
+             refZ,
+             safeProfileName);
+    pCharacteristic->write(payload);
+    pCharacteristic->notify(payload);
+}
+
 void bluetoothStartAdvertising() {
     rtt.println("BLE: start advertising");
     startAdvertising();
