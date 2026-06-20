@@ -15,6 +15,11 @@ enum Mode {
     MODE_COUNT
 };
 
+// Transient state used only as a handoff to bootloader OTA DFU.
+enum {
+    MODE_DFU = MODE_COUNT
+};
+
 extern const char* modeNames[];
 
 // ── Sub-modes ──────────────────────────────────────────────────────────────

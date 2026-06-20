@@ -1,4 +1,5 @@
 #include "calibration.h"
+#include "bluetooth.h"
 #include "button.h"
 #include "motor.h"
 #include "therapy.h"
@@ -84,6 +85,7 @@ static void calibrationFail(const char* reason) {
     } else {
         rtt.printf("CALIBRATION FAILED: %s\n", reason);
     }
+    notifyCalibrationStatus(false, "failed", "", 0.0f, 0.0f, 0.0f);
 
     goToTrainingMode();
 }
@@ -104,6 +106,15 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
 
     if (!addNextCalibrationProfile()) {
         rtt.println("CALIBRATION: PROFILE SAVE FAILED");
+        notifyCalibrationStatus(false, "failed", "", avgX, avgY, avgZ);
+    } else {
+        const OrientationProfile* activeProfile = getActiveProfile();
+        notifyCalibrationStatus(false,
+                                "completed",
+                                activeProfile ? activeProfile->name : "",
+                                avgX,
+                                avgY,
+                                avgZ);
     }
 
     // Start this after profile storage so flash writes cannot stretch the pulse.
@@ -363,6 +374,7 @@ void startCalibration() {
     s_lastSampleTime = millis();
 
     rtt.println("CALIBRATION: START");
+    notifyCalibrationStatus(true, "started", "", 0.0f, 0.0f, 0.0f);
     rtt.println("CALIBRATION: GET READY - 2 sec");
 }
 
@@ -371,6 +383,7 @@ void cancelCalibration() {
         return;
     }
     rtt.println("CALIBRATION: CANCELLED");
+    notifyCalibrationStatus(false, "cancelled", "", 0.0f, 0.0f, 0.0f);
     calibState = CALIB_STATE_IDLE;
     motorSetDuty(0);
     s_failVibEndMs      = 0;
