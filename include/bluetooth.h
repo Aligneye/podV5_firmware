@@ -17,6 +17,7 @@ void bluetoothRequestCalibrationStart();
 void bluetoothRequestBatteryStatusBlink();
 void notifyCalibrationStatus(bool started, const char* status, const char* profileName, float refX, float refY, float refZ);
 void notifyDfuStatus(const char* status);
+void notifyDeviceInfo();
 
 /** Notify BLE layer that a new session was stored. */
 void notifyNewSessionStored();
