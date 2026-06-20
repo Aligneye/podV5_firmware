@@ -7,6 +7,7 @@
 #include "device_time.h"
 #include "session_stats.h"
 #include "BatteryMonitor.h"
+#include "version.h"
 #include <bluefruit.h>
 #include <ble_hci.h>
 #if __has_include(<InternalFileSystem.h>)
@@ -367,6 +368,9 @@ static void applyAction(const String &valueRaw) {
         pendingDfuEnter = true;
         notifyDfuStatus("armed");
         rtt.println("BLE CMD: ACTION=ENTER_DFU");
+    } else if (value == "DEVICE_INFO" || value == "GET_VERSION" || value == "VERSION") {
+        notifyDeviceInfo();
+        rtt.println("BLE CMD: ACTION=DEVICE_INFO");
     } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
         clearCalibrationProfiles();
         rtt.println("BLE CMD: ACTION=PROFILE_CLEAR");
@@ -758,6 +762,22 @@ void notifyDfuStatus(const char* status) {
     snprintf(payload, sizeof(payload),
              "{\"t\":\"D\",\"status\":\"%s\"}",
              (status && status[0] != '\0') ? status : "unknown");
+    pCharacteristic->write(payload);
+    pCharacteristic->notify(payload);
+}
+
+void notifyDeviceInfo() {
+    if (!pCharacteristic || !connected) {
+        return;
+    }
+
+    char payload[192];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"V\",\"device_model\":\"%s\",\"hw_version\":\"%s\",\"fw_version\":\"%s\",\"fw_build_date\":\"%s\"}",
+             DEVICE_MODEL,
+             HW_VERSION,
+             FW_VERSION,
+             FW_BUILD_DATE);
     pCharacteristic->write(payload);
     pCharacteristic->notify(payload);
 }
