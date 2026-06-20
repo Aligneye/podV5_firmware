@@ -35,6 +35,7 @@ static bool forceTelemetrySync = false;
 static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
 static unsigned long connectedSinceMs = 0;
+static volatile bool pendingDfuEnter = false;
 
 static BLEService gService(BLE_SERVICE_UUID);
 static BLECharacteristic gCharacteristic(BLE_CHARACTERISTIC_UUID);
@@ -361,6 +362,11 @@ static void applyAction(const String &valueRaw) {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
         rtt.println("BLE CMD: ACTION=CALIBRATE_CANCEL");
+    } else if (value == "ENTER_DFU" || value == "OTA_DFU" || value == "DFU") {
+        if (pendingDfuEnter) return;
+        pendingDfuEnter = true;
+        notifyDfuStatus("armed");
+        rtt.println("BLE CMD: ACTION=ENTER_DFU");
     } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
         clearCalibrationProfiles();
         rtt.println("BLE CMD: ACTION=PROFILE_CLEAR");
@@ -565,6 +571,14 @@ void bluetoothSetup() {
 void bluetoothLoop() {
     if (!pCharacteristic) return;
 
+    if (pendingDfuEnter) {
+        pendingDfuEnter = false;
+        rtt.println("DFU: entering OTA bootloader");
+        delay(50);
+        enterOTADfu();
+        return;
+    }
+
     unsigned long now = millis();
     if (connected && connectionHapticPending && !connectionHapticPlayed &&
         connectedSinceMs != 0UL &&
@@ -731,6 +745,19 @@ void notifyCalibrationStatus(bool started, const char* status, const char* profi
              refY,
              refZ,
              safeProfileName);
+    pCharacteristic->write(payload);
+    pCharacteristic->notify(payload);
+}
+
+void notifyDfuStatus(const char* status) {
+    if (!pCharacteristic || !connected) {
+        return;
+    }
+
+    char payload[96];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"D\",\"status\":\"%s\"}",
+             (status && status[0] != '\0') ? status : "unknown");
     pCharacteristic->write(payload);
     pCharacteristic->notify(payload);
 }

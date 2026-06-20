@@ -19,7 +19,7 @@
 extern RTTStream rtt;
 
 // ── Name arrays ────────────────────────────────────────────────────────────
-const char *modeNames[] = {"Training Mode", "Therapy Mode", "OFF Mode"};
+const char *modeNames[] = {"Training Mode", "Therapy Mode", "OFF Mode", "DFU Mode"};
 const char *trainingSubModes[] = {"Instant", "Delayed", "No alerts"};
 const char *therapySubModes[] = {"10 min", "20 min", "30 min"};
 
@@ -125,6 +125,15 @@ static void handleDoubleClick() {
 
     DEBUG_PRINT("Therapy Sub-Mode changed: ");
     DEBUG_PRINTLN(therapySubModes[therapySubModeIndex]);
+    break;
+
+  case MODE_OFF:
+    DEBUG_PRINTLN("Entering OTA DFU from OFF mode");
+    setDeviceMode((Mode)MODE_DFU);
+    notifyDfuStatus("armed");
+    rtt.println("DFU: entering OTA bootloader");
+    delay(50);
+    enterOTADfu();
     break;
 
   default:
