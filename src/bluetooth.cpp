@@ -358,7 +358,7 @@ static void applyAction(const String &valueRaw) {
     if (value == "CALIBRATE") {
         if (isCalibrating()) return;
         deviceOn = true;
-        calibrationRequestStart();
+        startCalibration();
         rtt.println("BLE CMD: ACTION=CALIBRATE");
     } else if (value == "CALIBRATE_CANCEL") {
         if (!isCalibrating()) return;
