@@ -85,7 +85,7 @@ static void calibrationFail(const char* reason) {
     } else {
         rtt.printf("CALIBRATION FAILED: %s\n", reason);
     }
-    notifyCalibrationStatus(false, "failed", "", 0.0f, 0.0f, 0.0f);
+    notifyCalibrationStatus("failed", "fail");
 
     goToTrainingMode();
 }
@@ -106,15 +106,9 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
 
     if (!addNextCalibrationProfile()) {
         rtt.println("CALIBRATION: PROFILE SAVE FAILED");
-        notifyCalibrationStatus(false, "failed", "", avgX, avgY, avgZ);
+        notifyCalibrationStatus("failed", "fail");
     } else {
-        const OrientationProfile* activeProfile = getActiveProfile();
-        notifyCalibrationStatus(false,
-                                "completed",
-                                activeProfile ? activeProfile->name : "",
-                                avgX,
-                                avgY,
-                                avgZ);
+        notifyCalibrationStatus("complete", "success");
     }
 
     // Start this after profile storage so flash writes cannot stretch the pulse.
@@ -374,7 +368,7 @@ void startCalibration() {
     s_lastSampleTime = millis();
 
     rtt.println("CALIBRATION: START");
-    notifyCalibrationStatus(true, "started", "", 0.0f, 0.0f, 0.0f);
+    notifyCalibrationStatus("", "");
     rtt.println("CALIBRATION: GET READY - 2 sec");
 }
 
@@ -383,7 +377,7 @@ void cancelCalibration() {
         return;
     }
     rtt.println("CALIBRATION: CANCELLED");
-    notifyCalibrationStatus(false, "cancelled", "", 0.0f, 0.0f, 0.0f);
+    notifyCalibrationStatus("cancelled", "fail");
     calibState = CALIB_STATE_IDLE;
     motorSetDuty(0);
     s_failVibEndMs      = 0;
