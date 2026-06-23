@@ -635,8 +635,10 @@ void bluetoothLoop() {
 
     updateBatteryReading(now);
 
-    if (connected && currentMode == MODE_TRAINING && !isCalibrating() &&
-        (forceLiveSync || (now - lastLiveSendMs) >= 150UL)) {
+    const bool shouldSendLive = connected && !isCalibrating() &&
+        (forceLiveSync || (now - lastLiveSendMs) >= 150UL);
+
+    if (shouldSendLive) {
         updatePostureAngle();
     }
 
@@ -688,7 +690,7 @@ void bluetoothLoop() {
             lastTelemetrySend = now;
         }
 
-        if (forceLiveSync || (now - lastLiveSendMs) >= 150UL) {
+        if (shouldSendLive) {
             char liveBuffer[64];
             snprintf(liveBuffer, sizeof(liveBuffer),
                 "{\"t\":\"L\",\"angle\":%.2f,\"posture\":\"%s\"}",
