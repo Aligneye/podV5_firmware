@@ -15,7 +15,7 @@ void bluetoothUnlockForPairing();
 /** Safe from BLE RX callback: only sets a deferred flag (see calibration). */
 void bluetoothRequestCalibrationStart();
 void bluetoothRequestBatteryStatusBlink();
-void notifyCalibrationStatus(bool started, const char* status, const char* profileName, float refX, float refY, float refZ);
+void notifyCalibrationStatus(const char* calibrationResult, const char* complete);
 void notifyDfuStatus(const char* status);
 void notifyDeviceInfo();
 

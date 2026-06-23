@@ -357,7 +357,8 @@ static void applyAction(const String &valueRaw) {
 
     if (value == "CALIBRATE") {
         if (isCalibrating()) return;
-        calibrationRequestStart();
+        deviceOn = true;
+        startCalibration();
         rtt.println("BLE CMD: ACTION=CALIBRATE");
     } else if (value == "CALIBRATE_CANCEL") {
         if (!isCalibrating()) return;
@@ -727,28 +728,41 @@ void bluetoothLoop() {
 
 }
 
-void notifyCalibrationStatus(bool started, const char* status, const char* profileName, float refX, float refY, float refZ) {
+void notifyCalibrationStatus(const char* calibrationResult, const char* complete) {
     if (!pCharacteristic || !connected) {
         return;
     }
 
-    char safeProfileName[32];
-    if (!profileName || profileName[0] == '\0') {
-        safeProfileName[0] = '\0';
+    const bool calibrating = isCalibrating();
+    const uint32_t elapsed = getCalibrationElapsedMs();
+    const uint32_t total = getCalibrationTotalMs();
+    const char* phase = getCalibrationPhase();
+
+    char safeResult[24];
+    if (!calibrationResult || calibrationResult[0] == '\0') {
+        safeResult[0] = '\0';
     } else {
-        strncpy(safeProfileName, profileName, sizeof(safeProfileName) - 1);
-        safeProfileName[sizeof(safeProfileName) - 1] = '\0';
+        strncpy(safeResult, calibrationResult, sizeof(safeResult) - 1);
+        safeResult[sizeof(safeResult) - 1] = '\0';
+    }
+
+    char safeComplete[16];
+    if (!complete || complete[0] == '\0') {
+        safeComplete[0] = '\0';
+    } else {
+        strncpy(safeComplete, complete, sizeof(safeComplete) - 1);
+        safeComplete[sizeof(safeComplete) - 1] = '\0';
     }
 
     char payload[160];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"C\",\"started\":%s,\"status\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"z\":%.2f,\"profile\":\"%s\"}",
-             started ? "true" : "false",
-             (status && status[0] != '\0') ? status : "unknown",
-             refX,
-             refY,
-             refZ,
-             safeProfileName);
+             "{\"t\":\"C\",\"isCalibrating\":%s,\"c_phase\":\"%s\",\"calibrationResult\":\"%s\",\"complete\":\"%s\",\"c_elap\":%lu,\"c_tot\":%lu}",
+             calibrating ? "true" : "false",
+             phase ? phase : "IDLE",
+             safeResult,
+             safeComplete,
+             (unsigned long)elapsed,
+             (unsigned long)total);
     pCharacteristic->write(payload);
     pCharacteristic->notify(payload);
 }
