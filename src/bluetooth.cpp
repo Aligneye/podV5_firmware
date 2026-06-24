@@ -77,6 +77,21 @@ static void sendBlePacket(const char* payload) {
     rttPrintBlePacket("TX", payload);
 }
 
+static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* error = nullptr) {
+    if (!cmd || cmd[0] == '\0') return;
+    char payload[192];
+    if (ok) {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":true}",
+                 (unsigned long)seq, cmd);
+    } else {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
+                 (unsigned long)seq, cmd, error ? error : "UNKNOWN_ERROR");
+    }
+    sendBlePacket(payload);
+}
+
 static const char* bleDisconnectReasonText(uint8_t reason) {
     switch (reason) {
         case BLE_HCI_CONNECTION_TIMEOUT:
@@ -564,10 +579,117 @@ static void applyProfileCommand(const String& valueRaw) {
     }
 }
 
+static bool extractJsonStringField(const String& payload, const char* key, String& out) {
+    String pattern = String("\"") + key + "\"";
+    int keyPos = payload.indexOf(pattern);
+    if (keyPos < 0) return false;
+    int colonPos = payload.indexOf(':', keyPos + pattern.length());
+    if (colonPos < 0) return false;
+    int firstQuote = payload.indexOf('"', colonPos + 1);
+    if (firstQuote < 0) return false;
+    int secondQuote = payload.indexOf('"', firstQuote + 1);
+    if (secondQuote < 0) return false;
+    out = payload.substring(firstQuote + 1, secondQuote);
+    return true;
+}
+
+static bool extractJsonIntField(const String& payload, const char* key, uint32_t& out) {
+    String pattern = String("\"") + key + "\"";
+    int keyPos = payload.indexOf(pattern);
+    if (keyPos < 0) return false;
+    int colonPos = payload.indexOf(':', keyPos + pattern.length());
+    if (colonPos < 0) return false;
+    int start = colonPos + 1;
+    while (start < (int)payload.length() && isspace((unsigned char)payload[start])) start++;
+    int end = start;
+    while (end < (int)payload.length() && isdigit((unsigned char)payload[end])) end++;
+    if (end <= start) return false;
+    out = (uint32_t)payload.substring(start, end).toInt();
+    return true;
+}
+
 static void parseAndApplyBleCommand(const String &payloadRaw) {
     String payload = payloadRaw;
     payload.trim();
     if (payload.length() == 0) return;
+
+    if (payload.startsWith("{")) {
+        String cmd;
+        uint32_t seq = 0u;
+        bool hasSeq = extractJsonIntField(payload, "seq", seq);
+        bool hasCmd = extractJsonStringField(payload, "cmd", cmd);
+        cmd.toUpperCase();
+        bool ok = false;
+        const char* error = nullptr;
+
+        if (hasCmd) {
+            if (cmd == "GET_PROFILES") {
+                pendingProfileListSend = true;
+                ok = true;
+            } else if (cmd == "CALIBRATE_CANCEL") {
+                requestCalibrationCancel();
+                ok = true;
+            } else if (cmd == "CALIBRATE_START") {
+                String profileName = "Profile";
+                String slotValue;
+                extractJsonStringField(payload, "slot", slotValue);
+                extractJsonStringField(payload, "name", profileName);
+                if (slotValue == "auto") {
+                    ok = addCalibrationProfile(profileName.c_str());
+                    if (!ok) error = "PROFILE_CREATE_FAILED";
+                } else {
+                    error = "INVALID_SLOT";
+                }
+            } else if (cmd == "PROFILE_SELECT") {
+                uint32_t id = 0u;
+                if (extractJsonIntField(payload, "id", id)) {
+                    ok = selectCalibrationProfileById(id);
+                    if (!ok) error = "PROFILE_NOT_FOUND";
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_SET_DEFAULT") {
+                uint32_t id = 0u;
+                if (extractJsonIntField(payload, "id", id)) {
+                    ok = getProfileById(id) != nullptr;
+                    if (ok) {
+                        setProfileDefaultById(id);
+                    } else {
+                        error = "PROFILE_NOT_FOUND";
+                    }
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_RENAME") {
+                uint32_t id = 0u;
+                String name;
+                if (extractJsonIntField(payload, "id", id) && extractJsonStringField(payload, "name", name)) {
+                    ok = renameCalibrationProfileById(id, name.c_str());
+                    if (!ok) error = "PROFILE_NOT_FOUND";
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_DELETE") {
+                uint32_t id = 0u;
+                if (extractJsonIntField(payload, "id", id)) {
+                    ok = deleteCalibrationProfileById(id);
+                    if (!ok) error = "PROFILE_NOT_FOUND";
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_CLEAR_ALL") {
+                clearCalibrationProfiles();
+                ok = true;
+            } else {
+                error = "UNKNOWN_CMD";
+            }
+
+            if (hasSeq) {
+                sendCommandAck(seq, cmd.c_str(), ok, error);
+            }
+        }
+        return;
+    }
 
     String requestedMode = "";
     String cmdName = "";
