@@ -51,6 +51,17 @@ static float s_lastCalibratedY = 0.0f;
 static float s_lastCalibratedZ = 0.0f;
 static bool  s_lastCalibrationValid = false;
 
+struct CalibrationStats {
+    float meanX;
+    float meanY;
+    float meanZ;
+    float stdDevX;
+    float stdDevY;
+    float stdDevZ;
+};
+
+static CalibrationStats calculateCalibrationStats(int sampleLimit);
+
 static uint16_t computeCalibrationQuality(uint32_t sampleCount, const CalibrationStats& stats) {
     float spread = (stats.stdDevX + stats.stdDevY + stats.stdDevZ) / 3.0f;
     float quality = 100.0f - (spread * 25.0f);
@@ -62,14 +73,12 @@ static uint16_t computeCalibrationQuality(uint32_t sampleCount, const Calibratio
     return (uint16_t)(quality + 0.5f);
 }
 
-struct CalibrationStats {
-    float meanX;
-    float meanY;
-    float meanZ;
-    float stdDevX;
-    float stdDevY;
-    float stdDevZ;
-};
+static const char* calibrationQualityLabel(uint16_t quality) {
+    if (quality >= 85) return "Excellent";
+    if (quality >= 70) return "Good";
+    if (quality >= 50) return "Acceptable";
+    return "Fail";
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 static void goToTrainingMode() {
@@ -117,18 +126,24 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
 
     CalibrationStats finalStats = calculateCalibrationStats(totalSamples);
     const uint16_t quality = computeCalibrationQuality((uint32_t)totalSamples, finalStats);
+    const char* qualityLabel = calibrationQualityLabel(quality);
 
     const uint32_t profileIdBeforeSave = (getActiveProfile() ? getActiveProfile()->id : 0u);
     const int activeIndexBeforeSave = getActiveProfileIndex();
     const uint8_t slotBeforeSave = (activeIndexBeforeSave >= 0) ? (uint8_t)(activeIndexBeforeSave + 1) : 0u;
 
-    if (!addNextCalibrationProfile()) {
+    if (quality < 50) {
+        rtt.println("CALIBRATION: QUALITY TOO LOW");
+        notifyCalibrationStatus("failed", "done");
+        notifyCalibrationComplete(false, 0u, "", 0u, quality, (uint16_t)totalSamples, "LOW_QUALITY");
+    } else if (!addNextCalibrationProfile()) {
         rtt.println("CALIBRATION: PROFILE SAVE FAILED");
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, "MOVEMENT_TOO_HIGH");
     } else {
         const OrientationProfile* active = getActiveProfile();
         const uint32_t profileId = active ? active->id : 0u;
+        rtt.printf("CALIBRATION QUALITY: %s (%u%%)\n", qualityLabel, (unsigned)quality);
         notifyCalibrationStatus("success", "done");
         notifyCalibrationComplete(true,
                                   profileId ? profileId : profileIdBeforeSave,

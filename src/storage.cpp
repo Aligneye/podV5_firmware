@@ -55,6 +55,7 @@ struct PersistedSettings {
     uint32_t           nextProfileId;
     uint32_t           defaultProfileId;
     OrientationProfile profiles[8];
+    uint32_t           crc;
 };
 
 static PersistedSettings g_settings = {
@@ -68,7 +69,8 @@ static PersistedSettings g_settings = {
     {0, 0, 0},
     1u,
     0u,
-    {}
+    {},
+    0u
 };
 
 static constexpr uint8_t ACTIVE_PROFILE_DEFAULT = 0u;
@@ -109,6 +111,16 @@ static uint32_t decodeStoredNextProfileId() {
 
 static uint32_t decodeStoredDefaultProfileId() {
     return g_settings.defaultProfileId;
+}
+
+static uint32_t computeSettingsCrc(const PersistedSettings& settings) {
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&settings);
+    uint32_t crc = 2166136261u;
+    for (size_t i = 0; i < sizeof(PersistedSettings) - sizeof(uint32_t); i++) {
+        crc ^= bytes[i];
+        crc *= 16777619u;
+    }
+    return crc;
 }
 
 #if PROFILE_STORE_HAS_FS
@@ -200,6 +212,7 @@ static void persist() {
     constexpr uint32_t kWordCount =
         (sizeof(PersistedSettings) + 3u) / 4u;
     uint32_t buffer[kWordCount] = {0};
+    g_settings.crc = computeSettingsCrc(g_settings);
     memcpy(buffer, &g_settings, sizeof(g_settings));
 
     noInterrupts();
@@ -267,6 +280,7 @@ static bool loadFromFlash() {
         g_settings.profiles[0].stabilityScore = 0.0f;
         g_settings.profiles[0].valid = 1;
 
+        g_settings.crc = 0u;
         persist();  // migrate flash layout to v4
         return true;
     }
@@ -284,6 +298,10 @@ static bool loadFromFlash() {
     if (fabsf(g_settings.calY) < 0.1f && fabsf(g_settings.calZ) < 0.1f) {
         g_settings.calY = 6.75f;
         g_settings.calZ = 6.75f;
+    }
+    const uint32_t expectedCrc = computeSettingsCrc(g_settings);
+    if (g_settings.crc != 0u && g_settings.crc != expectedCrc) {
+        return false;
     }
     return true;
 }
@@ -372,6 +390,9 @@ bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
     if (g_settings.profileCount > 8) {
         g_settings.profileCount = 8;
         *count = 8;
+    }
+    if (g_settings.profileCount == 0) {
+        return true;
     }
     memcpy(profiles, g_settings.profiles, g_settings.profileCount * sizeof(OrientationProfile));
     return true;

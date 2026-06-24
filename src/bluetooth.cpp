@@ -770,6 +770,7 @@ void bluetoothLoop() {
     }
 
     const OrientationProfile *activeProfile = getActiveProfile();
+    const uint32_t profileId = activeProfile ? activeProfile->id : 0u;
     const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
 
     const char *modeString = "TRACKING";
@@ -801,12 +802,14 @@ void bluetoothLoop() {
         static char lastMode[12] = "";
         static char lastSubMode[16] = "";
         static char lastProfile[32] = "";
+        static uint32_t lastProfileId = 0u;
         static uint8_t lastBatteryPercentage = 255;
 
         bool telemetryChanged = forceTelemetrySync || !telemetryCacheValid ||
             strcmp(lastMode, modeString) != 0 ||
             strcmp(lastSubMode, subModeStr) != 0 ||
             strcmp(lastProfile, profileName) != 0 ||
+            lastProfileId != profileId ||
             lastBatteryPercentage != batteryPercentage;
 
         if (!isCalibrating() &&
@@ -814,9 +817,10 @@ void bluetoothLoop() {
             char telemetryBuffer[128];
             snprintf(telemetryBuffer, sizeof(telemetryBuffer),
                 "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
-                "\"profile\":\"%s\",\"battery\":%u}",
+                "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
                 modeString,
                 subModeStr,
+                (unsigned long)profileId,
                 profileName,
                 (unsigned)batteryPercentage
             );
@@ -831,6 +835,7 @@ void bluetoothLoop() {
             lastSubMode[sizeof(lastSubMode) - 1] = '\0';
             strncpy(lastProfile, profileName, sizeof(lastProfile) - 1);
             lastProfile[sizeof(lastProfile) - 1] = '\0';
+            lastProfileId = profileId;
             lastBatteryPercentage = batteryPercentage;
             telemetryCacheValid = true;
             forceTelemetrySync = false;
@@ -840,7 +845,8 @@ void bluetoothLoop() {
         if (shouldSendLive) {
             char liveBuffer[64];
             snprintf(liveBuffer, sizeof(liveBuffer),
-                "{\"t\":\"L\",\"angle\":%.2f,\"posture\":\"%s\"}",
+                "{\"t\":\"L\",\"profile_id\":%lu,\"angle\":%.2f,\"posture\":\"%s\"}",
+                (unsigned long)profileId,
                 currentAngle,
                 appPosture
             );
