@@ -26,5 +26,6 @@ void storageSaveNextProfileOverwriteIndex(uint8_t index);
 
 bool storageLoadCalibration(float* y, float* z);
 void storageSaveCalibration(float y, float z);
+void storageFactoryReset();
 
 

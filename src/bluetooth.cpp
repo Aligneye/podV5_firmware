@@ -4,6 +4,7 @@
 #include "button.h"
 #include "training.h"
 #include "motor.h"
+#include "storage.h"
 #include "device_time.h"
 #include "session_stats.h"
 #include "BatteryMonitor.h"
@@ -39,6 +40,7 @@ static unsigned long lastLiveSendMs = 0;
 static unsigned long connectedSinceMs = 0;
 static volatile bool pendingDfuEnter = false;
 static volatile bool pendingProfileListSend = false;
+static volatile bool pendingFactoryReset = false;
 
 static BLEService gService(BLE_SERVICE_UUID);
 static BLECharacteristic gCharacteristic(BLE_CHARACTERISTIC_UUID);
@@ -89,6 +91,16 @@ static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* e
                  "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
                  (unsigned long)seq, cmd, error ? error : "UNKNOWN_ERROR");
     }
+    sendBlePacket(payload);
+}
+
+static void sendDeviceInfoPacket() {
+    if (!pCharacteristic || !connected) return;
+    char payload[192];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"INFO\",\"fw\":\"%s\",\"hw\":\"%s\",\"serial\":\"AEPOD0001\",\"protocol\":2,\"max_profiles\":8}",
+             FW_VERSION,
+             HW_VERSION);
     sendBlePacket(payload);
 }
 
@@ -401,12 +413,15 @@ static void applyAction(const String &valueRaw) {
         pendingDfuEnter = true;
         notifyDfuStatus("armed");
         logEvent("BLE", "action_enter_dfu");
-    } else if (value == "DEVICE_INFO" || value == "GET_VERSION" || value == "VERSION") {
-        notifyDeviceInfo();
+    } else if (value == "DEVICE_INFO" || value == "GET_VERSION" || value == "VERSION" || value == "GET_DEVICE_INFO") {
+        sendDeviceInfoPacket();
         logEvent("BLE", "action_device_info");
     } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
         clearCalibrationProfiles();
         logEvent("BLE", "action_profile_clear");
+    } else if (value == "FACTORY_RESET") {
+        pendingFactoryReset = true;
+        logEvent("BLE", "action_factory_reset");
     }
 }
 
@@ -679,6 +694,12 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 }
             } else if (cmd == "PROFILE_CLEAR_ALL") {
                 clearCalibrationProfiles();
+                ok = true;
+            } else if (cmd == "GET_DEVICE_INFO") {
+                sendDeviceInfoPacket();
+                ok = true;
+            } else if (cmd == "FACTORY_RESET") {
+                pendingFactoryReset = true;
                 ok = true;
             } else {
                 error = "UNKNOWN_CMD";
@@ -995,6 +1016,14 @@ void bluetoothLoop() {
             forceLiveSync = false;
             lastLiveSendMs = now;
         }
+    }
+
+    if (pendingFactoryReset) {
+        pendingFactoryReset = false;
+        storageFactoryReset();
+        saveBlePairMarker(false);
+        NVIC_SystemReset();
+        return;
     }
 
     // RTT mirror of the live packet stream. Keep this aligned with what the

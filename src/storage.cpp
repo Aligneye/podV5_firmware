@@ -366,6 +366,19 @@ void storageSaveCalibration(float y, float z) {
     logEvent("STORAGE", "saved_posture_calibration");
 }
 
+void storageFactoryReset() {
+    g_settings.trainingDelay = (uint8_t)TRAIN_INSTANT;
+    g_settings.calY = 6.75f;
+    g_settings.calZ = 6.75f;
+    g_settings.profileCount = 0;
+    memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+    g_settings.nextProfileId = 1u;
+    g_settings.defaultProfileId = 0u;
+    memset(g_settings.profiles, 0, sizeof(g_settings.profiles));
+    persist();
+    logEvent("STORAGE", "factory_reset");
+}
+
 bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
     if (!profiles || !count) return false;
 
