@@ -10,6 +10,7 @@
 #include <Wire.h>
 #include <math.h>
 #include <string.h>
+#include "monitor_log.h"
 
 /**
 Ye code different modules ko connect kar raha hai.

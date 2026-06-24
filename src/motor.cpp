@@ -10,6 +10,7 @@ static volatile uint8_t g_overrideDuty = 0;
 static volatile uint32_t g_overrideUntilMs = 0;
 static volatile uint32_t g_calmStartMs = 0;
 static volatile uint16_t g_calmDurationMs = 0;
+static volatile bool g_motorActive = false;
 
 static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 50;
 
@@ -24,6 +25,7 @@ static void applyDuty(uint8_t duty) {
 
     if (duty == g_dutyApplied) return;
     g_dutyApplied = duty;
+    g_motorActive = duty != 0;
 
     // Use hardware PWM via analogWrite to prevent excessive startup current and brownout resets
     analogWrite(PIN_MOTOR, duty);
@@ -64,6 +66,7 @@ void motorSetup() {
     g_overrideUntilMs = 0;
     g_calmStartMs = 0;
     g_calmDurationMs = 0;
+    g_motorActive = false;
 }
 
 void motorSetDuty(uint8_t duty) {
@@ -105,6 +108,10 @@ void motorCancelFeedback() {
     g_overrideDuty = 0;
     g_calmDurationMs = 0;
     applyDuty(g_dutyWanted);
+}
+
+bool motorIsActive() {
+    return g_motorActive || g_overrideUntilMs != 0u || g_calmDurationMs != 0u;
 }
 
 void motorUpdate() {

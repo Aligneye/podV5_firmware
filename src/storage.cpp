@@ -6,6 +6,7 @@
 #include <RTTStream.h>
 #include <string.h>
 #include <math.h>
+#include "monitor_log.h"
 
 extern RTTStream rtt;
 
@@ -24,7 +25,7 @@ using namespace Adafruit_LittleFS_Namespace;
 // this project place the application well below this address.
 static constexpr uint32_t SETTINGS_PAGE_ADDR = 0x00073000UL;
 static constexpr uint32_t SETTINGS_MAGIC     = 0x414C4733UL;  // "ALG3"
-static constexpr uint16_t SETTINGS_VERSION   = 4u;
+static constexpr uint16_t SETTINGS_VERSION   = 5u;
 
 struct PersistedSettingsV1 {
     uint32_t magic;
@@ -51,7 +52,10 @@ struct PersistedSettings {
     float     calZ;
     uint8_t            profileCount;
     uint8_t            reserved2[3];
+    uint32_t           nextProfileId;
+    uint32_t           defaultProfileId;
     OrientationProfile profiles[8];
+    uint32_t           crc;
 };
 
 static PersistedSettings g_settings = {
@@ -63,7 +67,10 @@ static PersistedSettings g_settings = {
     6.75f,
     0u,
     {0, 0, 0},
-    {}
+    1u,
+    0u,
+    {},
+    0u
 };
 
 static constexpr uint8_t ACTIVE_PROFILE_DEFAULT = 0u;
@@ -95,6 +102,25 @@ static uint8_t decodeStoredNextOverwriteIndex() {
     const uint8_t stored = g_settings.reserved2[1];
     if (stored >= ACTIVE_PROFILE_MAX_STORED) return NEXT_OVERWRITE_DEFAULT;
     return stored;
+}
+
+static uint32_t decodeStoredNextProfileId() {
+    if (g_settings.nextProfileId == 0u) return 1u;
+    return g_settings.nextProfileId;
+}
+
+static uint32_t decodeStoredDefaultProfileId() {
+    return g_settings.defaultProfileId;
+}
+
+static uint32_t computeSettingsCrc(const PersistedSettings& settings) {
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&settings);
+    uint32_t crc = 2166136261u;
+    for (size_t i = 0; i < sizeof(PersistedSettings) - sizeof(uint32_t); i++) {
+        crc ^= bytes[i];
+        crc *= 16777619u;
+    }
+    return crc;
 }
 
 #if PROFILE_STORE_HAS_FS
@@ -186,6 +212,7 @@ static void persist() {
     constexpr uint32_t kWordCount =
         (sizeof(PersistedSettings) + 3u) / 4u;
     uint32_t buffer[kWordCount] = {0};
+    g_settings.crc = computeSettingsCrc(g_settings);
     memcpy(buffer, &g_settings, sizeof(g_settings));
 
     noInterrupts();
@@ -239,14 +266,21 @@ static bool loadFromFlash() {
         g_settings.calZ = calZ;
         g_settings.profileCount = 1;
         memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+        g_settings.nextProfileId = 2u;
+        g_settings.defaultProfileId = 0u;
 
+        g_settings.profiles[0].id = 1u;
         strncpy(g_settings.profiles[0].name, "Default Vertical", sizeof(g_settings.profiles[0].name) - 1);
         g_settings.profiles[0].name[sizeof(g_settings.profiles[0].name) - 1] = '\0';
         g_settings.profiles[0].refX = refX;
         g_settings.profiles[0].refY = calY;
         g_settings.profiles[0].refZ = calZ;
-        g_settings.profiles[0].createdAt = 0;
+        g_settings.profiles[0].createdAtEpoch = 0;
+        g_settings.profiles[0].sampleCount = 0;
+        g_settings.profiles[0].stabilityScore = 0.0f;
+        g_settings.profiles[0].valid = 1;
 
+        g_settings.crc = 0u;
         persist();  // migrate flash layout to v4
         return true;
     }
@@ -260,9 +294,14 @@ static bool loadFromFlash() {
     }
 
     g_settings = *flash;
+    if (g_settings.nextProfileId == 0u) g_settings.nextProfileId = 1u;
     if (fabsf(g_settings.calY) < 0.1f && fabsf(g_settings.calZ) < 0.1f) {
         g_settings.calY = 6.75f;
         g_settings.calZ = 6.75f;
+    }
+    const uint32_t expectedCrc = computeSettingsCrc(g_settings);
+    if (g_settings.crc != 0u && g_settings.crc != expectedCrc) {
+        return false;
     }
     return true;
 }
@@ -270,10 +309,11 @@ static bool loadFromFlash() {
 // ── Public API ─────────────────────────────────────────────────────────────
 void storageSetup() {
     if (loadFromFlash()) {
-        rtt.print("Storage: loaded, training delay = ");
-        rtt.println((int)g_settings.trainingDelay);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "{\"t\":\"STORAGE\",\"event\":\"loaded\",\"training_delay\":%u}", (unsigned)g_settings.trainingDelay);
+        logPacket("EVT", buf);
     } else {
-        rtt.println("Storage: empty, writing defaults");
+        logEvent("STORAGE", "empty_defaults");
         persist();
     }
     session_log_init();
@@ -303,8 +343,9 @@ uint8_t storageLoadTherapySubMode() {
 
 void storageSaveTherapySubMode(uint8_t idx) {
     saveTrainingDelay((TrainingDelay)idx);
-    rtt.print("Storage: saved training delay = ");
-    rtt.println((int)loadTrainingDelay());
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"t\":\"STORAGE\",\"event\":\"save_training_delay\",\"value\":%u}", (unsigned)loadTrainingDelay());
+    logPacket("EVT", buf);
 }
 
 bool storageLoadCalibration(float* y, float* z) {
@@ -322,7 +363,20 @@ void storageSaveCalibration(float y, float z) {
     g_settings.calY = y;
     g_settings.calZ = z;
     persist();
-    rtt.println("Storage: saved posture calibration");
+    logEvent("STORAGE", "saved_posture_calibration");
+}
+
+void storageFactoryReset() {
+    g_settings.trainingDelay = (uint8_t)TRAIN_INSTANT;
+    g_settings.calY = 6.75f;
+    g_settings.calZ = 6.75f;
+    g_settings.profileCount = 0;
+    memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+    g_settings.nextProfileId = 1u;
+    g_settings.defaultProfileId = 0u;
+    memset(g_settings.profiles, 0, sizeof(g_settings.profiles));
+    persist();
+    logEvent("STORAGE", "factory_reset");
 }
 
 bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
@@ -349,6 +403,9 @@ bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
     if (g_settings.profileCount > 8) {
         g_settings.profileCount = 8;
         *count = 8;
+    }
+    if (g_settings.profileCount == 0) {
+        return true;
     }
     memcpy(profiles, g_settings.profiles, g_settings.profileCount * sizeof(OrientationProfile));
     return true;
@@ -401,6 +458,33 @@ void storageSaveNextProfileOverwriteIndex(uint8_t index) {
     if (g_settings.reserved2[1] == index) return;
 
     g_settings.reserved2[1] = index;
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return;
+#endif
+    persist();
+}
+
+uint32_t storageLoadDefaultProfileId() {
+    return decodeStoredDefaultProfileId();
+}
+
+void storageSaveDefaultProfileId(uint32_t id) {
+    if (g_settings.defaultProfileId == id) return;
+    g_settings.defaultProfileId = id;
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return;
+#endif
+    persist();
+}
+
+uint32_t storageLoadNextProfileId() {
+    return decodeStoredNextProfileId();
+}
+
+void storageSaveNextProfileId(uint32_t id) {
+    if (id == 0u) id = 1u;
+    if (g_settings.nextProfileId == id) return;
+    g_settings.nextProfileId = id;
 #if PROFILE_STORE_HAS_FS
     if (writeProfileStore()) return;
 #endif

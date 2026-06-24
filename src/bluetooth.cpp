@@ -4,10 +4,12 @@
 #include "button.h"
 #include "training.h"
 #include "motor.h"
+#include "storage.h"
 #include "device_time.h"
 #include "session_stats.h"
 #include "BatteryMonitor.h"
 #include "version.h"
+#include "monitor_log.h"
 #include <bluefruit.h>
 #include <ble_hci.h>
 #if __has_include(<InternalFileSystem.h>)
@@ -37,6 +39,8 @@ static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
 static unsigned long connectedSinceMs = 0;
 static volatile bool pendingDfuEnter = false;
+static volatile bool pendingProfileListSend = false;
+static volatile bool pendingFactoryReset = false;
 
 static BLEService gService(BLE_SERVICE_UUID);
 static BLECharacteristic gCharacteristic(BLE_CHARACTERISTIC_UUID);
@@ -59,6 +63,46 @@ static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
 static constexpr uint8_t DISCONNECTION_HAPTIC_DUTY = 150;
 static constexpr uint16_t DISCONNECTION_HAPTIC_MS = 250;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
+
+static void rttPrintBlePacket(const char* direction, const char* payload) {
+    if (!direction || !payload) return;
+    rtt.print("[BLE ");
+    rtt.print(direction);
+    rtt.print("] ");
+    rtt.println(payload);
+}
+
+static void sendBlePacket(const char* payload) {
+    if (!pCharacteristic || !payload) return;
+    pCharacteristic->write(payload);
+    pCharacteristic->notify(payload);
+    rttPrintBlePacket("TX", payload);
+}
+
+static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* error = nullptr) {
+    if (!cmd || cmd[0] == '\0') return;
+    char payload[192];
+    if (ok) {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":true}",
+                 (unsigned long)seq, cmd);
+    } else {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
+                 (unsigned long)seq, cmd, error ? error : "UNKNOWN_ERROR");
+    }
+    sendBlePacket(payload);
+}
+
+static void sendDeviceInfoPacket() {
+    if (!pCharacteristic || !connected) return;
+    char payload[192];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"INFO\",\"fw\":\"%s\",\"hw\":\"%s\",\"serial\":\"AEPOD0001\",\"protocol\":2,\"max_profiles\":8}",
+             FW_VERSION,
+             HW_VERSION);
+    sendBlePacket(payload);
+}
 
 static const char* bleDisconnectReasonText(uint8_t reason) {
     switch (reason) {
@@ -215,7 +259,7 @@ static void onBleConnect(uint16_t conn_handle) {
     lastLiveSendMs = 0;
     connectedSinceMs = millis();
     turnRgbLedOff();
-    rtt.println("BLE: Connected");
+    rtt.println("[BLE EVT] connected");
 }
 
 static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
@@ -227,7 +271,7 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     disconnectionHapticPending = true;
     forceLiveSync = false;
     connectedSinceMs = 0UL;
-    rtt.print("BLE: Disconnected reason=0x");
+    rtt.print("[BLE EVT] disconnected reason=0x");
     rtt.print(reason, HEX);
     rtt.print(" (");
     rtt.print(bleDisconnectReasonText(reason));
@@ -246,7 +290,7 @@ static void onBleSecured(uint16_t conn_handle) {
     blePairingKnownPaired = true;
     pairingUnlockActive = false;
     connectionHapticPending = true;
-    rtt.println("BLE: Paired/Secured");
+    rtt.println("[BLE EVT] secured");
 }
 
 static void applyTrainingTiming(const String &valueRaw) {
@@ -326,11 +370,11 @@ static void applyMode(const String &valueRaw) {
         if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
             markSubModeChanged();
         }
-        rtt.println("BLE CMD: MODE=TRAINING");
+        logEvent("BLE", "mode_training");
     } else if (value == "THERAPY") {
         deviceOn = true;
         setDeviceMode(MODE_THERAPY);
-        rtt.println("BLE CMD: MODE=THERAPY");
+        logEvent("BLE", "mode_therapy");
     }
 }
 
@@ -342,11 +386,11 @@ static void applyCalibrationControl(const String &valueRaw) {
     if (value == "START") {
         if (isCalibrating()) return;
         calibrationRequestStart();
-        rtt.println("BLE CMD: CALIBRATION START");
+        logEvent("BLE", "calibration_start");
     } else if (value == "CANCEL") {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
-        rtt.println("BLE CMD: CALIBRATION CANCEL");
+        logEvent("BLE", "calibration_cancel");
     }
 }
 
@@ -359,23 +403,75 @@ static void applyAction(const String &valueRaw) {
         if (isCalibrating()) return;
         deviceOn = true;
         startCalibration();
-        rtt.println("BLE CMD: ACTION=CALIBRATE");
+        logEvent("BLE", "action_calibrate");
     } else if (value == "CALIBRATE_CANCEL") {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
-        rtt.println("BLE CMD: ACTION=CALIBRATE_CANCEL");
+        logEvent("BLE", "action_calibrate_cancel");
     } else if (value == "ENTER_DFU" || value == "OTA_DFU" || value == "DFU") {
         if (pendingDfuEnter) return;
         pendingDfuEnter = true;
         notifyDfuStatus("armed");
-        rtt.println("BLE CMD: ACTION=ENTER_DFU");
-    } else if (value == "DEVICE_INFO" || value == "GET_VERSION" || value == "VERSION") {
-        notifyDeviceInfo();
-        rtt.println("BLE CMD: ACTION=DEVICE_INFO");
+        logEvent("BLE", "action_enter_dfu");
+    } else if (value == "DEVICE_INFO" || value == "GET_VERSION" || value == "VERSION" || value == "GET_DEVICE_INFO") {
+        sendDeviceInfoPacket();
+        logEvent("BLE", "action_device_info");
     } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
         clearCalibrationProfiles();
-        rtt.println("BLE CMD: ACTION=PROFILE_CLEAR");
+        logEvent("BLE", "action_profile_clear");
+    } else if (value == "FACTORY_RESET") {
+        pendingFactoryReset = true;
+        logEvent("BLE", "action_factory_reset");
     }
+}
+
+static void sendProfileList() {
+    if (!pCharacteristic || !connected) return;
+    char payload[1024];
+    char profilesJson[800];
+    profilesJson[0] = '\0';
+    strncat(profilesJson, "[", sizeof(profilesJson) - 1);
+    for (uint8_t i = 0; i < getProfileCount(); i++) {
+        const OrientationProfile* p = getProfile(i);
+        if (!p || !p->valid) continue;
+        int quality = (int)(p->stabilityScore);
+        if (quality < 0) quality = 0;
+        if (quality > 100) quality = 100;
+        char item[192];
+        snprintf(item, sizeof(item),
+                 "%s{\"id\":%lu,\"slot\":%u,\"name\":\"%s\",\"valid\":true,\"active\":%s,\"default\":%s,\"created\":%lu,\"quality\":%d}",
+                 (profilesJson[1] == '\0') ? "" : ",",
+                 (unsigned long)p->id,
+                 (unsigned)(i + 1),
+                 p->name,
+                 (getActiveProfile() && getActiveProfile()->id == p->id) ? "true" : "false",
+                 (getDefaultProfileId() == p->id) ? "true" : "false",
+                 (unsigned long)p->createdAtEpoch,
+                 quality);
+        strncat(profilesJson, item, sizeof(profilesJson) - strlen(profilesJson) - 1);
+    }
+    strncat(profilesJson, "]", sizeof(profilesJson) - strlen(profilesJson) - 1);
+    snprintf(payload, sizeof(payload), "{\"t\":\"P\",\"profiles\":%s,\"count\":%u,\"max\":8}", profilesJson, (unsigned)getProfileCount());
+    sendBlePacket(payload);
+}
+
+static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint8_t slot = 0, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr) {
+    if (!pCharacteristic || !connected) return;
+    char payload[256];
+    if (success) {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"profile_id\":%lu,\"slot\":%u,\"name\":\"%s\",\"quality\":%u,\"sample_count\":%u}",
+                 (unsigned long)profileId, (unsigned)slot, name ? name : "", (unsigned)quality, (unsigned)samples);
+    } else {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"failed\",\"reason\":\"%s\"}",
+                 reason ? reason : "MOVEMENT_TOO_HIGH");
+    }
+    sendBlePacket(payload);
+}
+
+void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint8_t slot, uint16_t quality, uint16_t sampleCount, const char* reason) {
+    sendCalibrationDone(success, profileId, name, slot, quality, sampleCount, reason);
 }
 
 static void applyTimeSync(const String &valueRaw) {
@@ -384,7 +480,9 @@ static void applyTimeSync(const String &valueRaw) {
     long epoch = value.toInt();
     if (epoch > 0) {
         setDeviceTime(epoch);
-        rtt.printf("BLE CMD: TIME=%ld\n", epoch);
+        char payload[48];
+        snprintf(payload, sizeof(payload), "{\"time\":%ld}", epoch);
+        logPacket("BLE", payload);
     }
 }
 
@@ -393,7 +491,9 @@ static void applyTZOffset(const String &valueRaw) {
     value.trim();
     long tz = value.toInt();
     setDeviceTZOffset(tz);
-    rtt.printf("BLE CMD: TZ=%ld\n", tz);
+    char payload[48];
+    snprintf(payload, sizeof(payload), "{\"tz\":%ld}", tz);
+    logPacket("BLE", payload);
 }
 
 static void applyTherapyIntensity(const String &valueRaw) {
@@ -402,7 +502,9 @@ static void applyTherapyIntensity(const String &valueRaw) {
     int level = value.toInt();
     if (level >= 1 && level <= 3) {
         therapyIntensityLevel = level;
-        rtt.printf("BLE CMD: THERAPY_INTENSITY=%d\n", level);
+        char payload[48];
+        snprintf(payload, sizeof(payload), "{\"therapy_intensity\":%d}", level);
+        logPacket("BLE", payload);
     }
 }
 
@@ -412,7 +514,9 @@ static void applyDifficultyDegrees(const String &valueRaw) {
     int deg = value.toInt();
     if (deg >= 5 && deg <= 60) {
         kBadPostureDeg = (float)deg;
-        rtt.printf("BLE CMD: DIFFICULTY_DEG=%d\n", deg);
+        char payload[48];
+        snprintf(payload, sizeof(payload), "{\"difficulty_deg\":%d}", deg);
+        logPacket("BLE", payload);
     }
 }
 
@@ -425,22 +529,26 @@ static void applyProfileSelection(const String &valueRaw) {
     upper.toUpperCase();
     if (upper == "CLEAR" || upper == "RESET") {
         clearCalibrationProfiles();
-        rtt.println("BLE CMD: PROFILE=CLEAR");
+        logEvent("BLE", "profile_clear");
         return;
     }
 
     if (upper == "DEFAULT") {
         selectDefaultCalibrationProfile();
-        rtt.println("BLE CMD: PROFILE=DEFAULT");
+        logEvent("BLE", "profile_default");
         return;
     }
 
     int requestedIndex = value.toInt();
     if (requestedIndex > 0) {
         if (selectCalibrationProfile((uint8_t)(requestedIndex - 1))) {
-            rtt.printf("BLE CMD: PROFILE_INDEX=%d\n", requestedIndex);
+            char payload[64];
+            snprintf(payload, sizeof(payload), "{\"profile_index\":%d}", requestedIndex);
+            logPacket("BLE", payload);
         } else {
-            rtt.printf("BLE CMD: PROFILE_INDEX=%d ignored\n", requestedIndex);
+            char payload[80];
+            snprintf(payload, sizeof(payload), "{\"profile_index\":%d,\"ignored\":true}", requestedIndex);
+            logPacket("BLE", payload);
         }
         return;
     }
@@ -452,12 +560,67 @@ static void applyProfileSelection(const String &valueRaw) {
         profileName.toUpperCase();
         if (upper == profileName) {
             selectCalibrationProfile(i);
-            rtt.printf("BLE CMD: PROFILE=%s\n", profile->name);
+            char payload[96];
+            snprintf(payload, sizeof(payload), "{\"profile\":\"%s\"}", profile->name);
+            logPacket("BLE", payload);
             return;
         }
     }
 
-    rtt.printf("BLE CMD: PROFILE=%s ignored\n", value.c_str());
+    char payload[128];
+    snprintf(payload, sizeof(payload), "{\"profile\":\"%s\",\"ignored\":true}", value.c_str());
+    logPacket("BLE", payload);
+}
+
+static void applyProfileCommand(const String& valueRaw) {
+    String value = valueRaw;
+    value.trim();
+    if (value.startsWith("SET_DEFAULT;id=")) {
+        uint32_t id = (uint32_t)value.substring(14).toInt();
+        setProfileDefaultById(id);
+    } else if (value.startsWith("SELECT;id=")) {
+        uint32_t id = (uint32_t)value.substring(10).toInt();
+        selectCalibrationProfileById(id);
+    } else if (value.startsWith("RENAME;id=")) {
+        int namePos = value.indexOf(";name=");
+        uint32_t id = (uint32_t)value.substring(10, namePos).toInt();
+        String newName = value.substring(namePos + 6);
+        renameCalibrationProfileById(id, newName.c_str());
+    } else if (value.startsWith("DELETE;id=")) {
+        uint32_t id = (uint32_t)value.substring(10).toInt();
+        deleteCalibrationProfileById(id);
+    } else if (value == "CLEAR_ALL") {
+        clearCalibrationProfiles();
+    }
+}
+
+static bool extractJsonStringField(const String& payload, const char* key, String& out) {
+    String pattern = String("\"") + key + "\"";
+    int keyPos = payload.indexOf(pattern);
+    if (keyPos < 0) return false;
+    int colonPos = payload.indexOf(':', keyPos + pattern.length());
+    if (colonPos < 0) return false;
+    int firstQuote = payload.indexOf('"', colonPos + 1);
+    if (firstQuote < 0) return false;
+    int secondQuote = payload.indexOf('"', firstQuote + 1);
+    if (secondQuote < 0) return false;
+    out = payload.substring(firstQuote + 1, secondQuote);
+    return true;
+}
+
+static bool extractJsonIntField(const String& payload, const char* key, uint32_t& out) {
+    String pattern = String("\"") + key + "\"";
+    int keyPos = payload.indexOf(pattern);
+    if (keyPos < 0) return false;
+    int colonPos = payload.indexOf(':', keyPos + pattern.length());
+    if (colonPos < 0) return false;
+    int start = colonPos + 1;
+    while (start < (int)payload.length() && isspace((unsigned char)payload[start])) start++;
+    int end = start;
+    while (end < (int)payload.length() && isdigit((unsigned char)payload[end])) end++;
+    if (end <= start) return false;
+    out = (uint32_t)payload.substring(start, end).toInt();
+    return true;
 }
 
 static void parseAndApplyBleCommand(const String &payloadRaw) {
@@ -465,7 +628,93 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
     payload.trim();
     if (payload.length() == 0) return;
 
+    if (payload.startsWith("{")) {
+        String cmd;
+        uint32_t seq = 0u;
+        bool hasSeq = extractJsonIntField(payload, "seq", seq);
+        bool hasCmd = extractJsonStringField(payload, "cmd", cmd);
+        cmd.toUpperCase();
+        bool ok = false;
+        const char* error = nullptr;
+
+        if (hasCmd) {
+            if (cmd == "GET_PROFILES") {
+                pendingProfileListSend = true;
+                ok = true;
+            } else if (cmd == "CALIBRATE_CANCEL") {
+                requestCalibrationCancel();
+                ok = true;
+            } else if (cmd == "CALIBRATE_START") {
+                String profileName = "Profile";
+                String slotValue;
+                extractJsonStringField(payload, "slot", slotValue);
+                extractJsonStringField(payload, "name", profileName);
+                if (slotValue == "auto") {
+                    ok = addCalibrationProfile(profileName.c_str());
+                    if (!ok) error = "PROFILE_CREATE_FAILED";
+                } else {
+                    error = "INVALID_SLOT";
+                }
+            } else if (cmd == "PROFILE_SELECT") {
+                uint32_t id = 0u;
+                if (extractJsonIntField(payload, "id", id)) {
+                    ok = selectCalibrationProfileById(id);
+                    if (!ok) error = "PROFILE_NOT_FOUND";
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_SET_DEFAULT") {
+                uint32_t id = 0u;
+                if (extractJsonIntField(payload, "id", id)) {
+                    ok = getProfileById(id) != nullptr;
+                    if (ok) {
+                        setProfileDefaultById(id);
+                    } else {
+                        error = "PROFILE_NOT_FOUND";
+                    }
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_RENAME") {
+                uint32_t id = 0u;
+                String name;
+                if (extractJsonIntField(payload, "id", id) && extractJsonStringField(payload, "name", name)) {
+                    ok = renameCalibrationProfileById(id, name.c_str());
+                    if (!ok) error = "PROFILE_NOT_FOUND";
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_DELETE") {
+                uint32_t id = 0u;
+                if (extractJsonIntField(payload, "id", id)) {
+                    ok = deleteCalibrationProfileById(id);
+                    if (!ok) error = "PROFILE_NOT_FOUND";
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "PROFILE_CLEAR_ALL") {
+                clearCalibrationProfiles();
+                ok = true;
+            } else if (cmd == "GET_DEVICE_INFO") {
+                sendDeviceInfoPacket();
+                ok = true;
+            } else if (cmd == "FACTORY_RESET") {
+                pendingFactoryReset = true;
+                ok = true;
+            } else {
+                error = "UNKNOWN_CMD";
+            }
+
+            if (hasSeq) {
+                sendCommandAck(seq, cmd.c_str(), ok, error);
+            }
+        }
+        return;
+    }
+
     String requestedMode = "";
+    String cmdName = "";
+    String cmdParams[4];
     int start = 0;
     int payloadLen = payload.length();
     while (start < payloadLen) {
@@ -487,6 +736,8 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
 
             if (key == "MODE") {
                 requestedMode = value;
+            } else if (key == "CMD") {
+                cmdName = value;
             } else if (key == "POSTURE_TIMING") {
                 applyTrainingTiming(value);
             } else if (key == "THERAPY_DURATION_MIN") {
@@ -495,7 +746,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 applyTherapyIntensity(value);
             } else if (key == "DIFFICULTY_DEG") {
                 applyDifficultyDegrees(value);
-            } else if (key == "PROFILE" || key == "PROFILE_INDEX" || key == "PROFILES") {
+            } else if (key == "PROFILE") {
                 applyProfileSelection(value);
             } else if (key == "CALIBRATE" || key == "CALIBRATION") {
                 applyCalibrationControl(value);
@@ -509,6 +760,58 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
         }
 
         start = end + 1;
+    }
+
+    if (cmdName.length() > 0) {
+        if (cmdName == "GET_PROFILES") {
+            pendingProfileListSend = true;
+        } else if (cmdName == "CALIBRATE_CANCEL") {
+            requestCalibrationCancel();
+        } else if (cmdName == "CALIBRATE_START") {
+            String profileName = "Profile";
+            bool autoSlot = false;
+            start = 0;
+            while (start < payloadLen) {
+                int end = payload.indexOf(';', start);
+                if (end < 0) end = payload.length();
+                String token = payload.substring(start, end);
+                token.trim();
+                int sep = token.indexOf('=');
+                if (sep > 0) {
+                    String key = token.substring(0, sep);
+                    String value = token.substring(sep + 1);
+                    key.trim();
+                    key.toUpperCase();
+                    value.trim();
+                    if (key == "slot" && value == "auto") autoSlot = true;
+                    if (key == "name" && value.length() > 0) profileName = value;
+                }
+                start = end + 1;
+            }
+            if (autoSlot) addCalibrationProfile(profileName.c_str());
+        } else {
+            String cmdValue = cmdName;
+            if (payload.indexOf("PROFILE_SELECT;") >= 0 || payload.startsWith("PROFILE_SELECT")) {
+                String idStr = payload.substring(payload.indexOf("id=") + 3);
+                selectCalibrationProfileById((uint32_t)idStr.toInt());
+            } else if (payload.startsWith("PROFILE_SET_DEFAULT")) {
+                String idStr = payload.substring(payload.indexOf("id=") + 3);
+                setProfileDefaultById((uint32_t)idStr.toInt());
+            } else if (payload.startsWith("PROFILE_RENAME")) {
+                int idPos = payload.indexOf("id=");
+                int namePos = payload.indexOf(";name=");
+                if (idPos >= 0 && namePos > idPos) {
+                    uint32_t id = (uint32_t)payload.substring(idPos + 3, namePos).toInt();
+                    String newName = payload.substring(namePos + 6);
+                    renameCalibrationProfileById(id, newName.c_str());
+                }
+            } else if (payload.startsWith("PROFILE_DELETE")) {
+                String idStr = payload.substring(payload.indexOf("id=") + 3);
+                deleteCalibrationProfileById((uint32_t)idStr.toInt());
+            } else if (payload.startsWith("PROFILE_CLEAR_ALL")) {
+                clearCalibrationProfiles();
+            }
+        }
     }
 
     if (requestedMode.length() > 0) {
@@ -528,14 +831,13 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
     }
 
 #if ALIGN_RTT_BLE_RX_LOG
-    rtt.print("BLE RX CMD: ");
-    rtt.println(payload);
+    rttPrintBlePacket("RX", payload.c_str());
 #endif
     parseAndApplyBleCommand(payload);
 }
 
 void bluetoothSetup() {
-    rtt.print("Initializing BLE as: ");
+    rtt.print("[BLE EVT] init ");
     rtt.println(BLE_DEVICE_NAME);
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_GREEN, OUTPUT);
@@ -564,7 +866,7 @@ void bluetoothSetup() {
         gCharacteristic.setMaxLen(512);
         gCharacteristic.setWriteCallback(onCharacteristicWrite);
         gCharacteristic.begin();
-        gCharacteristic.write("{}");
+        rttPrintBlePacket("TX", "{}");
 
         pCharacteristic = &gCharacteristic;
         bleInitialized = true;
@@ -575,6 +877,11 @@ void bluetoothSetup() {
 
 void bluetoothLoop() {
     if (!pCharacteristic) return;
+
+    if (pendingProfileListSend && connected) {
+        pendingProfileListSend = false;
+        sendProfileList();
+    }
 
     if (pendingDfuEnter) {
         pendingDfuEnter = false;
@@ -622,6 +929,7 @@ void bluetoothLoop() {
     }
 
     const OrientationProfile *activeProfile = getActiveProfile();
+    const uint32_t profileId = activeProfile ? activeProfile->id : 0u;
     const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
 
     const char *modeString = "TRACKING";
@@ -653,12 +961,14 @@ void bluetoothLoop() {
         static char lastMode[12] = "";
         static char lastSubMode[16] = "";
         static char lastProfile[32] = "";
+        static uint32_t lastProfileId = 0u;
         static uint8_t lastBatteryPercentage = 255;
 
         bool telemetryChanged = forceTelemetrySync || !telemetryCacheValid ||
             strcmp(lastMode, modeString) != 0 ||
             strcmp(lastSubMode, subModeStr) != 0 ||
             strcmp(lastProfile, profileName) != 0 ||
+            lastProfileId != profileId ||
             lastBatteryPercentage != batteryPercentage;
 
         if (!isCalibrating() &&
@@ -666,14 +976,14 @@ void bluetoothLoop() {
             char telemetryBuffer[128];
             snprintf(telemetryBuffer, sizeof(telemetryBuffer),
                 "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
-                "\"profile\":\"%s\",\"battery\":%u}",
+                "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
                 modeString,
                 subModeStr,
+                (unsigned long)profileId,
                 profileName,
                 (unsigned)batteryPercentage
             );
-            pCharacteristic->write(telemetryBuffer);
-            pCharacteristic->notify(telemetryBuffer);
+            sendBlePacket(telemetryBuffer);
 #if ALIGN_RTT_JSON_LOG
             rtt.println(telemetryBuffer);
 #endif
@@ -684,6 +994,7 @@ void bluetoothLoop() {
             lastSubMode[sizeof(lastSubMode) - 1] = '\0';
             strncpy(lastProfile, profileName, sizeof(lastProfile) - 1);
             lastProfile[sizeof(lastProfile) - 1] = '\0';
+            lastProfileId = profileId;
             lastBatteryPercentage = batteryPercentage;
             telemetryCacheValid = true;
             forceTelemetrySync = false;
@@ -693,12 +1004,12 @@ void bluetoothLoop() {
         if (shouldSendLive) {
             char liveBuffer[64];
             snprintf(liveBuffer, sizeof(liveBuffer),
-                "{\"t\":\"L\",\"angle\":%.2f,\"posture\":\"%s\"}",
+                "{\"t\":\"L\",\"profile_id\":%lu,\"angle\":%.2f,\"posture\":\"%s\"}",
+                (unsigned long)profileId,
                 currentAngle,
                 appPosture
             );
-            pCharacteristic->write(liveBuffer);
-            pCharacteristic->notify(liveBuffer);
+            sendBlePacket(liveBuffer);
 #if ALIGN_RTT_JSON_LOG
             rtt.println(liveBuffer);
 #endif
@@ -707,30 +1018,40 @@ void bluetoothLoop() {
         }
     }
 
-    // Clean human-readable RTT status for day-to-day debugging.
+    if (pendingFactoryReset) {
+        pendingFactoryReset = false;
+        storageFactoryReset();
+        saveBlePairMarker(false);
+        NVIC_SystemReset();
+        return;
+    }
+
+    // RTT mirror of the live packet stream. Keep this aligned with what the
+    // app would receive over BLE instead of the old free-form STATUS output.
 #if ALIGN_RTT_STATUS_LOG
     static unsigned long lastStatusMs = 0;
     if (!isCalibrating() && (now - lastStatusMs) >= ALIGN_RTT_STATUS_INTERVAL_MS) {
         lastStatusMs = now;
-        rtt.printf("STATUS mode=%s profile=%s profiles=%u angle=%s deg dir=%s posture=%s bad=%s batt_mv=%u batper_mv=%u batt_adc=%u batt_pct=%u steps=%lu\n",
-                   modeString,
-                   profileName,
-                   (unsigned)getProfileCount(),
-                   String(currentAngle, 1).c_str(),
-                   directionText,
-                   postureText,
-                   isBadPosture ? "Y" : "N",
-                   batteryMillivolts,
-                   batterySenseMillivolts,
-                   batteryRawAdc,
-                   batteryPercentage,
-                   (unsigned long)getDeviceStepCount());
+        char statusBuffer[192];
+        snprintf(statusBuffer, sizeof(statusBuffer),
+                 "{\"t\":\"S\",\"mode\":\"%s\",\"profile\":\"%s\",\"profiles\":%u,\"angle\":%.1f,\"dir\":\"%s\",\"posture\":\"%s\",\"bad\":%s,\"battery_mv\":%u,\"battery_pct\":%u,\"steps\":%lu}",
+                 modeString,
+                 profileName,
+                 (unsigned)getProfileCount(),
+                 currentAngle,
+                 directionText,
+                 postureText,
+                 isBadPosture ? "true" : "false",
+                 batteryMillivolts,
+                 batteryPercentage,
+                 (unsigned long)getDeviceStepCount());
+        rttPrintBlePacket("TX", statusBuffer);
     }
 #endif
 
 }
 
-void notifyCalibrationStatus(const char* calibrationResult, const char* complete) {
+void notifyCalibrationStatus(const char* calibResult, const char* complete) {
     if (!pCharacteristic || !connected) {
         return;
     }
@@ -741,10 +1062,10 @@ void notifyCalibrationStatus(const char* calibrationResult, const char* complete
     const char* phase = getCalibrationPhase();
 
     char safeResult[24];
-    if (!calibrationResult || calibrationResult[0] == '\0') {
+    if (!calibResult || calibResult[0] == '\0') {
         safeResult[0] = '\0';
     } else {
-        strncpy(safeResult, calibrationResult, sizeof(safeResult) - 1);
+        strncpy(safeResult, calibResult, sizeof(safeResult) - 1);
         safeResult[sizeof(safeResult) - 1] = '\0';
     }
 
@@ -758,15 +1079,14 @@ void notifyCalibrationStatus(const char* calibrationResult, const char* complete
 
     char payload[160];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"C\",\"isCalibrating\":%s,\"c_phase\":\"%s\",\"calibrationResult\":\"%s\",\"complete\":\"%s\",\"c_elap\":%lu,\"c_tot\":%lu}",
+             "{\"t\":\"C\",\"isCalibrating\":%s,\"c_phase\":\"%s\",\"calibResult\":\"%s\",\"complete\":\"%s\",\"c_elap\":%lu,\"c_tot\":%lu}",
              calibrating ? "true" : "false",
              phase ? phase : "IDLE",
              safeResult,
              safeComplete,
              (unsigned long)elapsed,
              (unsigned long)total);
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
 }
 
 void notifyDfuStatus(const char* status) {
@@ -778,8 +1098,7 @@ void notifyDfuStatus(const char* status) {
     snprintf(payload, sizeof(payload),
              "{\"t\":\"D\",\"status\":\"%s\"}",
              (status && status[0] != '\0') ? status : "unknown");
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
 }
 
 void notifyDeviceInfo() {
@@ -794,17 +1113,24 @@ void notifyDeviceInfo() {
              HW_VERSION,
              FW_VERSION,
              FW_BUILD_DATE);
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
+}
+
+uint8_t bluetoothGetBatteryPercentage() {
+    return batteryPercentage;
+}
+
+bool bluetoothIsMotorActive() {
+    return motorIsActive();
 }
 
 void bluetoothStartAdvertising() {
-    rtt.println("BLE: start advertising");
+    rtt.println("[BLE EVT] start advertising");
     startAdvertising();
 }
 
 void bluetoothStopAdvertising() {
-    rtt.println("BLE: stop advertising");
+    rtt.println("[BLE EVT] stop advertising");
     Bluefruit.Advertising.stop();
 }
 
@@ -813,7 +1139,7 @@ bool bluetoothIsConnected() {
 }
 
 void bluetoothUnlockForPairing() {
-    rtt.println("BLE: unlock pairing - clearing bonds");
+    rtt.println("[BLE EVT] unlock pairing - clearing bonds");
 
     batteryBlinkActive = false;
     pairingUnlockActive = true;

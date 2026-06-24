@@ -42,6 +42,8 @@ def upload_firmware(source, target, env):
         "-s", str(scripts_dir),
         "-f", "interface/cmsis-dap.cfg",
         "-f", "target/nrf52.cfg",
+        "-c", "init",
+        "-c", "reset halt",
         "-c", f"program {{{firmware_bin}}} 0x26000 verify",
         "-c", f"program {{{signature_bin}}} 0x7F000 verify reset",
         "-c", "shutdown",

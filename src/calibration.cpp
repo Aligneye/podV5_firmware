@@ -5,6 +5,7 @@
 #include "therapy.h"
 #include "training.h"
 #include "storage.h"
+#include "monitor_log.h"
 #include <math.h>
 #include <string.h>
 
@@ -14,7 +15,7 @@ extern RTTStream rtt;
 enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };
 static CalibState calibState = CALIB_STATE_IDLE;
 
-static constexpr uint32_t CALIB_GET_READY_MS       = 2000UL;
+static constexpr uint32_t CALIB_GET_READY_MS       = 3000UL;
 static constexpr uint32_t CALIB_HOLD_MS            = 5000UL;
 static constexpr uint32_t CALIB_TOTAL_MS           = CALIB_GET_READY_MS + CALIB_HOLD_MS;
 static constexpr uint32_t CALIB_RESULT_BROADCAST_MS = 4000UL;
@@ -40,10 +41,14 @@ static float         samplesY[kMaxCalibrationSamples];
 static float         samplesZ[kMaxCalibrationSamples];
 
 static char          lastCalibrationResult[16] = "";
-static unsigned long calibrationResultSetAt    = 0;
+static unsigned long calibResultSetAt    = 0;
 
 static unsigned long s_failVibEndMs      = 0;
 static unsigned long s_successPulseEndMs = 0;
+static unsigned long s_postValidationStartMs = 0;
+static uint32_t      s_postValidationProfileId = 0u;
+static bool          s_postValidationActive = false;
+static bool          s_postValidationFailed = false;
 
 // Temporary buffer for successful calibration before profile naming
 static float s_lastCalibratedX = 0.0f;
@@ -60,6 +65,83 @@ struct CalibrationStats {
     float stdDevZ;
 };
 
+static CalibrationStats calculateCalibrationStats(int sampleLimit);
+
+static uint16_t computeCalibrationQuality(uint32_t sampleCount, const CalibrationStats& stats) {
+    float spread = (stats.stdDevX + stats.stdDevY + stats.stdDevZ) / 3.0f;
+    float quality = 100.0f - (spread * 25.0f);
+    if (sampleCount < MIN_VALID_SAMPLES) {
+        quality -= 15.0f;
+    }
+    if (quality < 0.0f) quality = 0.0f;
+    if (quality > 100.0f) quality = 100.0f;
+    return (uint16_t)(quality + 0.5f);
+}
+
+static const char* calibrationQualityLabel(uint16_t quality) {
+    if (quality >= 85) return "Excellent";
+    if (quality >= 70) return "Good";
+    if (quality >= 50) return "Acceptable";
+    return "Fail";
+}
+
+static void calibrationStartBlocked(const char* reason) {
+    logPacket("CALIB", reason ? reason : "START_BLOCKED");
+    notifyCalibrationComplete(false, 0u, "", 0u, 0u, 0u, reason ? reason : "START_BLOCKED");
+}
+
+static void startPostCalibrationValidation(uint32_t profileId) {
+    s_postValidationStartMs = millis();
+    s_postValidationProfileId = profileId;
+    s_postValidationActive = true;
+    s_postValidationFailed = false;
+}
+
+static void cancelPostCalibrationValidation() {
+    s_postValidationStartMs = 0;
+    s_postValidationProfileId = 0u;
+    s_postValidationActive = false;
+    s_postValidationFailed = false;
+}
+
+static void handlePostCalibrationValidation(unsigned long nowMs) {
+    if (!s_postValidationActive || s_postValidationFailed) {
+        return;
+    }
+
+    const unsigned long elapsed = nowMs - s_postValidationStartMs;
+    if ((elapsed % 1000UL) < 50UL) {
+        char payload[96];
+        snprintf(payload, sizeof(payload), "{\"event\":\"post_validate\",\"angle\":%.2f,\"elapsed_ms\":%lu}", currentAngle, elapsed);
+        logPacket("CALIB", payload);
+    }
+    if (elapsed < 5000UL) {
+        return;
+    }
+
+    if (elapsed <= 10000UL) {
+        if (fabsf(currentAngle) > 5.0f) {
+            s_postValidationFailed = true;
+            char payload[96];
+            snprintf(payload, sizeof(payload), "{\"event\":\"unstable\",\"angle\":%.2f,\"limit\":5}", currentAngle);
+            logPacket("CALIB", payload);
+            deleteCalibrationProfileById(s_postValidationProfileId);
+            notifyCalibrationComplete(false, s_postValidationProfileId, "", 0u, 0u, (uint16_t)totalSamples, "CALIBRATION_UNSTABLE");
+            cancelPostCalibrationValidation();
+        } else if (elapsed >= 9000UL) {
+            char payload[96];
+            snprintf(payload, sizeof(payload), "{\"event\":\"stable\",\"angle\":%.2f}", currentAngle);
+            logPacket("CALIB", payload);
+        }
+        return;
+    }
+
+    char payload[96];
+    snprintf(payload, sizeof(payload), "{\"event\":\"validated\",\"angle_limit\":5}");
+    logPacket("CALIB", payload);
+    cancelPostCalibrationValidation();
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 static void goToTrainingMode() {
     deviceOn = true;
@@ -70,7 +152,7 @@ static void calibrationFail(const char* reason) {
     calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-    calibrationResultSetAt = millis();
+    calibResultSetAt = millis();
     
     // Failure pulse: 500ms duration, 150 duty cycle
     motorSetDuty(0);
@@ -79,13 +161,15 @@ static void calibrationFail(const char* reason) {
 
     s_lastCalibrationValid = false;
 
-    // Exact console log format: "CALIB: BAD MOVEMENT - Failed" or generic "CALIBRATION FAILED: <reason>"
+    // Exact console log format: structured RTT packet
     if (strcmp(reason, "Bad movement") == 0 || strcmp(reason, "Too much movement") == 0) {
-        rtt.println("CALIB: BAD MOVEMENT - Failed");
+        logEvent("CALIB", "bad_movement_failed");
     } else {
-        rtt.printf("CALIBRATION FAILED: %s\n", reason);
+        char payload[80];
+        snprintf(payload, sizeof(payload), "{\"event\":\"failed\",\"reason\":\"%s\"}", reason);
+        logPacket("CALIB", payload);
     }
-    notifyCalibrationStatus("failed", "fail");
+    notifyCalibrationStatus("failed", "done");
 
     goToTrainingMode();
 }
@@ -94,21 +178,46 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-    calibrationResultSetAt = millis();
+    calibResultSetAt = millis();
     
     s_lastCalibratedX = avgX;
     s_lastCalibratedY = avgY;
     s_lastCalibratedZ = avgZ;
     s_lastCalibrationValid = true;
 
-    // Log exact formats
-    rtt.println("CALIBRATION: DONE");
+    logEvent("CALIB", "done");
 
-    if (!addNextCalibrationProfile()) {
-        rtt.println("CALIBRATION: PROFILE SAVE FAILED");
-        notifyCalibrationStatus("failed", "fail");
+    CalibrationStats finalStats = calculateCalibrationStats(totalSamples);
+    const uint16_t quality = computeCalibrationQuality((uint32_t)totalSamples, finalStats);
+    const char* qualityLabel = calibrationQualityLabel(quality);
+
+    const uint32_t profileIdBeforeSave = (getActiveProfile() ? getActiveProfile()->id : 0u);
+    const int activeIndexBeforeSave = getActiveProfileIndex();
+    const uint8_t slotBeforeSave = (activeIndexBeforeSave >= 0) ? (uint8_t)(activeIndexBeforeSave + 1) : 0u;
+
+    if (quality < 50) {
+        logEvent("CALIB", "quality_too_low");
+        notifyCalibrationStatus("failed", "done");
+        notifyCalibrationComplete(false, 0u, "", 0u, quality, (uint16_t)totalSamples, "LOW_QUALITY");
+    } else if (!addNextCalibrationProfile()) {
+        logEvent("CALIB", "profile_save_failed");
+        notifyCalibrationStatus("failed", "done");
+        notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, "MOVEMENT_TOO_HIGH");
     } else {
-        notifyCalibrationStatus("complete", "success");
+        const OrientationProfile* active = getActiveProfile();
+        const uint32_t profileId = active ? active->id : 0u;
+        char payload[96];
+        snprintf(payload, sizeof(payload), "{\"quality\":\"%s\",\"value\":%u}", qualityLabel, (unsigned)quality);
+        logPacket("CALIB", payload);
+        startPostCalibrationValidation(profileId ? profileId : profileIdBeforeSave);
+        notifyCalibrationStatus("success", "done");
+        notifyCalibrationComplete(true,
+                                  profileId ? profileId : profileIdBeforeSave,
+                                  active ? active->name : "",
+                                  slotBeforeSave,
+                                  quality,
+                                  (uint16_t)totalSamples,
+                                  nullptr);
     }
 
     // Start this after profile storage so flash writes cannot stretch the pulse.
@@ -170,6 +279,7 @@ void initCalibration() {
     motorSetDuty(0);
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
+    cancelPostCalibrationValidation();
     s_lastSampleTime    = 0;
     s_lastCalibrationValid = false;
     totalSamples = 0;
@@ -190,6 +300,8 @@ void handleCalibration() {
         startCalibration();
         return;
     }
+
+    handlePostCalibrationValidation(currentMillis);
 
     if (calibState == CALIB_STATE_IDLE) {
         return;
@@ -346,8 +458,29 @@ void startCalibration() {
         return;
     }
 
+    if (!bluetoothIsConnected()) {
+        calibrationStartBlocked("DEVICE_NOT_CONNECTED");
+        return;
+    }
+    if (!sensorInitialized) {
+        calibrationStartBlocked("SENSOR_NOT_INITIALIZED");
+        return;
+    }
+    if (bluetoothGetBatteryPercentage() < 10u) {
+        calibrationStartBlocked("LOW_BATTERY");
+        return;
+    }
+    if (therapyIsRunning() || bluetoothIsMotorActive()) {
+        calibrationStartBlocked("MOTOR_ACTIVE");
+        return;
+    }
+    if (isDeviceMoving()) {
+        calibrationStartBlocked("DEVICE_MOVING");
+        return;
+    }
+
     lastCalibrationResult[0] = '\0';
-    calibrationResultSetAt = 0;
+    calibResultSetAt = 0;
 
     deviceOn = true;
     wakePostureSensor();
@@ -367,17 +500,17 @@ void startCalibration() {
 
     s_lastSampleTime = millis();
 
-    rtt.println("CALIBRATION: START");
+    logEvent("CALIB", "start");
     notifyCalibrationStatus("", "");
-    rtt.println("CALIBRATION: GET READY - 2 sec");
+    logPacket("CALIB", "{\"phase\":\"GET_READY\",\"seconds\":3}");
 }
 
 void cancelCalibration() {
     if (calibState == CALIB_STATE_IDLE) {
         return;
     }
-    rtt.println("CALIBRATION: CANCELLED");
-    notifyCalibrationStatus("cancelled", "fail");
+    logEvent("CALIB", "cancelled");
+    notifyCalibrationStatus("cancelled", "done");
     calibState = CALIB_STATE_IDLE;
     motorSetDuty(0);
     s_failVibEndMs      = 0;
@@ -394,7 +527,7 @@ const char* getCalibrationResult() {
         return "";
     }
     const unsigned long now = millis();
-    if ((now - calibrationResultSetAt) > CALIB_RESULT_BROADCAST_MS) {
+    if ((now - calibResultSetAt) > CALIB_RESULT_BROADCAST_MS) {
         lastCalibrationResult[0] = '\0';
         return "";
     }

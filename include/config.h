@@ -65,7 +65,7 @@
 #endif
 
 #ifndef ALIGN_RTT_STATUS_LOG
-#define ALIGN_RTT_STATUS_LOG     1
+#define ALIGN_RTT_STATUS_LOG     0
 #endif
 
 #ifndef ALIGN_RTT_STATUS_INTERVAL_MS

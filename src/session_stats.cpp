@@ -100,12 +100,6 @@ static uint16_t clampToU16(unsigned long secs) {
     return (uint16_t)secs;
 }
 
-static uint32_t nowEpochOrBackfill(uint64_t atTicks) {
-    uint32_t live = getDeviceTime();
-    if (live != 0) return live;
-    return ticksToEpoch(atTicks);
-}
-
 #if SESSION_HAS_FS
 static bool writeStateAtomic() {
     InternalFS.remove(STATE_TMP_PATH);
