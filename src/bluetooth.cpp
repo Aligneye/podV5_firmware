@@ -397,7 +397,7 @@ static void applyAction(const String &valueRaw) {
 static void sendProfileList() {
     if (!pCharacteristic || !connected) return;
     char payload[1024];
-    char profilesJson[768];
+    char profilesJson[800];
     profilesJson[0] = '\0';
     strncat(profilesJson, "[", sizeof(profilesJson) - 1);
     for (uint8_t i = 0; i < getProfileCount(); i++) {
@@ -405,14 +405,15 @@ static void sendProfileList() {
         if (!p || !p->valid) continue;
         char item[192];
         snprintf(item, sizeof(item),
-                 "%s{\"id\":%lu,\"name\":\"%s\",\"refX\":%.3f,\"refY\":%.3f,\"refZ\":%.3f,\"createdAt\":%lu,\"sample_count\":%u,\"quality\":%u,\"valid\":true}",
+                 "%s{\"id\":%lu,\"slot\":%u,\"name\":\"%s\",\"valid\":true,\"active\":%s,\"default\":%s,\"created\":%lu,\"quality\":%.1f}",
                  (profilesJson[1] == '\0') ? "" : ",",
                  (unsigned long)p->id,
+                 (unsigned)(i + 1),
                  p->name,
-                 p->refX, p->refY, p->refZ,
-                 (unsigned long)p->createdAt,
-                 (unsigned)p->sampleCount,
-                 (unsigned)p->qualityScore);
+                 (getActiveProfile() && getActiveProfile()->id == p->id) ? "true" : "false",
+                 (getDefaultProfileId() == p->id) ? "true" : "false",
+                 (unsigned long)p->createdAtEpoch,
+                 p->stabilityScore);
         strncat(profilesJson, item, sizeof(profilesJson) - strlen(profilesJson) - 1);
     }
     strncat(profilesJson, "]", sizeof(profilesJson) - strlen(profilesJson) - 1);
@@ -545,6 +546,9 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
     if (payload.length() == 0) return;
 
     String requestedMode = "";
+    String cmdName = "";
+    String cmdParams[4];
+    uint8_t cmdParamCount = 0;
     int start = 0;
     int payloadLen = payload.length();
     while (start < payloadLen) {
@@ -566,6 +570,8 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
 
             if (key == "MODE") {
                 requestedMode = value;
+            } else if (key == "CMD") {
+                cmdName = value;
             } else if (key == "POSTURE_TIMING") {
                 applyTrainingTiming(value);
             } else if (key == "THERAPY_DURATION_MIN") {
@@ -574,23 +580,8 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 applyTherapyIntensity(value);
             } else if (key == "DIFFICULTY_DEG") {
                 applyDifficultyDegrees(value);
-            } else if (key == "CMD" && value == "GET_PROFILES") {
-                pendingProfileListSend = true;
-            } else if (key == "CALIBRATE_START") {
-                if (value.startsWith("slot=auto")) {
-                    if (value.indexOf(";name=") >= 0) {
-                        String name = value.substring(value.indexOf(";name=") + 6);
-                        addCalibrationProfile(name.c_str());
-                    } else {
-                        addNextCalibrationProfile();
-                    }
-                }
-            } else if (key == "CALIBRATE_CANCEL") {
-                requestCalibrationCancel();
             } else if (key == "PROFILE") {
                 applyProfileSelection(value);
-            } else if (key == "PROFILE_SET_DEFAULT" || key == "PROFILE_SELECT" || key == "PROFILE_RENAME" || key == "PROFILE_DELETE" || key == "PROFILE_CLEAR_ALL") {
-                applyProfileCommand(key + "=" + value);
             } else if (key == "CALIBRATE" || key == "CALIBRATION") {
                 applyCalibrationControl(value);
             } else if (key == "ACTION") {
@@ -603,6 +594,58 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
         }
 
         start = end + 1;
+    }
+
+    if (cmdName.length() > 0) {
+        if (cmdName == "GET_PROFILES") {
+            pendingProfileListSend = true;
+        } else if (cmdName == "CALIBRATE_CANCEL") {
+            requestCalibrationCancel();
+        } else if (cmdName == "CALIBRATE_START") {
+            String profileName = "Profile";
+            bool autoSlot = false;
+            start = 0;
+            while (start < payloadLen) {
+                int end = payload.indexOf(';', start);
+                if (end < 0) end = payload.length();
+                String token = payload.substring(start, end);
+                token.trim();
+                int sep = token.indexOf('=');
+                if (sep > 0) {
+                    String key = token.substring(0, sep);
+                    String value = token.substring(sep + 1);
+                    key.trim();
+                    key.toUpperCase();
+                    value.trim();
+                    if (key == "slot" && value == "auto") autoSlot = true;
+                    if (key == "name" && value.length() > 0) profileName = value;
+                }
+                start = end + 1;
+            }
+            if (autoSlot) addCalibrationProfile(profileName.c_str());
+        } else {
+            String cmdValue = cmdName;
+            if (payload.indexOf("PROFILE_SELECT;") >= 0 || payload.startsWith("PROFILE_SELECT")) {
+                String idStr = payload.substring(payload.indexOf("id=") + 3);
+                selectCalibrationProfileById((uint32_t)idStr.toInt());
+            } else if (payload.startsWith("PROFILE_SET_DEFAULT")) {
+                String idStr = payload.substring(payload.indexOf("id=") + 3);
+                setProfileDefaultById((uint32_t)idStr.toInt());
+            } else if (payload.startsWith("PROFILE_RENAME")) {
+                int idPos = payload.indexOf("id=");
+                int namePos = payload.indexOf(";name=");
+                if (idPos >= 0 && namePos > idPos) {
+                    uint32_t id = (uint32_t)payload.substring(idPos + 3, namePos).toInt();
+                    String newName = payload.substring(namePos + 6);
+                    renameCalibrationProfileById(id, newName.c_str());
+                }
+            } else if (payload.startsWith("PROFILE_DELETE")) {
+                String idStr = payload.substring(payload.indexOf("id=") + 3);
+                deleteCalibrationProfileById((uint32_t)idStr.toInt());
+            } else if (payload.startsWith("PROFILE_CLEAR_ALL")) {
+                clearCalibrationProfiles();
+            }
+        }
     }
 
     if (requestedMode.length() > 0) {
@@ -828,7 +871,7 @@ void bluetoothLoop() {
 
 }
 
-void notifyCalibrationStatus(const char* calibrationResult, const char* complete) {
+void notifyCalibrationStatus(const char* calibResult, const char* complete) {
     if (!pCharacteristic || !connected) {
         return;
     }
@@ -839,10 +882,10 @@ void notifyCalibrationStatus(const char* calibrationResult, const char* complete
     const char* phase = getCalibrationPhase();
 
     char safeResult[24];
-    if (!calibrationResult || calibrationResult[0] == '\0') {
+    if (!calibResult || calibResult[0] == '\0') {
         safeResult[0] = '\0';
     } else {
-        strncpy(safeResult, calibrationResult, sizeof(safeResult) - 1);
+        strncpy(safeResult, calibResult, sizeof(safeResult) - 1);
         safeResult[sizeof(safeResult) - 1] = '\0';
     }
 
@@ -856,7 +899,7 @@ void notifyCalibrationStatus(const char* calibrationResult, const char* complete
 
     char payload[160];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"C\",\"isCalibrating\":%s,\"c_phase\":\"%s\",\"calibrationResult\":\"%s\",\"complete\":\"%s\",\"c_elap\":%lu,\"c_tot\":%lu}",
+             "{\"t\":\"C\",\"isCalibrating\":%s,\"c_phase\":\"%s\",\"calibResult\":\"%s\",\"complete\":\"%s\",\"c_elap\":%lu,\"c_tot\":%lu}",
              calibrating ? "true" : "false",
              phase ? phase : "IDLE",
              safeResult,

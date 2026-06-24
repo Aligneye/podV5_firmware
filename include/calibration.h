@@ -4,17 +4,27 @@
 #include <RTTStream.h>
 #include "config.h"
 
-struct OrientationProfile {
+struct CalibrationProfile {
     uint32_t id;
-    char name[16];
+    char name[24];
     float refX;
     float refY;
     float refZ;
-    uint32_t createdAt;
+    uint32_t createdAtEpoch;
     uint16_t sampleCount;
-    uint16_t qualityScore;
+    float stabilityScore;
     uint8_t valid;
     uint8_t reserved[3];
+};
+
+using OrientationProfile = CalibrationProfile;
+
+struct CalibrationSettings {
+    uint8_t version;
+    uint8_t activeProfileIndex;
+    uint8_t defaultProfileIndex;
+    CalibrationProfile profiles[8];
+    uint32_t crc;
 };
 
 bool addCalibrationProfile(const char* name);

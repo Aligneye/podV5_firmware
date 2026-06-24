@@ -7,6 +7,7 @@
 #include "device_time.h"
 #include "training.h"
 #include <OneButton.h>
+#include "monitor_log.h"
 
 #ifdef DEBUG_LOGGING
 #define DEBUG_PRINT(x) rtt.print(x)
@@ -131,7 +132,7 @@ static void handleDoubleClick() {
     DEBUG_PRINTLN("Entering OTA DFU from OFF mode");
     setDeviceMode((Mode)MODE_DFU);
     notifyDfuStatus("armed");
-    rtt.println("DFU: entering OTA bootloader");
+    logEvent("DFU", "entering_ota_bootloader");
     delay(50);
     enterOTADfu();
     break;
@@ -207,7 +208,7 @@ void buttonLoop() {
 
   if (!isTransitioning) {
     if (currentMode == MODE_OFF && !offPrinted) {
-      rtt.println("off");
+      logEvent("MODE", "off");
       offPrinted = true;
     }
 

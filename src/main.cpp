@@ -11,32 +11,25 @@
 #include "device_time.h"
 #include "motor.h"
 #include "session_stats.h"
+#include "monitor_log.h"
 
 RTTStream rtt;
 
 static void printResetReason() {
     uint32_t reason = NRF_POWER->RESETREAS;
-    rtt.print("Reset reason: 0x");
-    rtt.println(reason, HEX);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"t\":\"BOOT\",\"reset_reason\":\"0x%08lX\"}", (unsigned long)reason);
+    logPacket("EVT", buf);
     if (reason == 0) {
-        rtt.println("Reset flags: none latched");
+        logEvent("BOOT", "reset_flags=none");
     } else {
-        rtt.print("Reset flags:");
-        if (reason & POWER_RESETREAS_RESETPIN_Msk) rtt.print(" RESETPIN");
-        if (reason & POWER_RESETREAS_DOG_Msk)      rtt.print(" WATCHDOG");
-        if (reason & POWER_RESETREAS_SREQ_Msk)     rtt.print(" SOFT");
-        if (reason & POWER_RESETREAS_LOCKUP_Msk)   rtt.print(" LOCKUP");
-        if (reason & POWER_RESETREAS_OFF_Msk)      rtt.print(" SYSTEM_OFF_WAKE");
-        if (reason & POWER_RESETREAS_LPCOMP_Msk)   rtt.print(" LPCOMP");
-        if (reason & POWER_RESETREAS_DIF_Msk)      rtt.print(" DEBUG_IF");
-        if (reason & POWER_RESETREAS_NFC_Msk)      rtt.print(" NFC");
-        rtt.println();
+        logEvent("BOOT", "reset_flags=present");
     }
     NRF_POWER->RESETREAS = reason; // clear latched flags
 }
 
 void setup() {
-    rtt.println("=== AlignEye Firmware V4 ===");
+    logEvent("BOOT", "aligneye_firmware_v4");
     printResetReason();
     storageSetup();
     initSessionStats();

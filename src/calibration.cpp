@@ -40,7 +40,7 @@ static float         samplesY[kMaxCalibrationSamples];
 static float         samplesZ[kMaxCalibrationSamples];
 
 static char          lastCalibrationResult[16] = "";
-static unsigned long calibrationResultSetAt    = 0;
+static unsigned long calibResultSetAt    = 0;
 
 static unsigned long s_failVibEndMs      = 0;
 static unsigned long s_successPulseEndMs = 0;
@@ -70,7 +70,7 @@ static void calibrationFail(const char* reason) {
     calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-    calibrationResultSetAt = millis();
+    calibResultSetAt = millis();
     
     // Failure pulse: 500ms duration, 150 duty cycle
     motorSetDuty(0);
@@ -94,7 +94,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
-    calibrationResultSetAt = millis();
+    calibResultSetAt = millis();
     
     s_lastCalibratedX = avgX;
     s_lastCalibratedY = avgY;
@@ -347,7 +347,7 @@ void startCalibration() {
     }
 
     lastCalibrationResult[0] = '\0';
-    calibrationResultSetAt = 0;
+    calibResultSetAt = 0;
 
     deviceOn = true;
     wakePostureSensor();
@@ -394,7 +394,7 @@ const char* getCalibrationResult() {
         return "";
     }
     const unsigned long now = millis();
-    if ((now - calibrationResultSetAt) > CALIB_RESULT_BROADCAST_MS) {
+    if ((now - calibResultSetAt) > CALIB_RESULT_BROADCAST_MS) {
         lastCalibrationResult[0] = '\0';
         return "";
     }

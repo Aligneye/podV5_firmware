@@ -6,6 +6,7 @@
 #include <RTTStream.h>
 #include <string.h>
 #include <math.h>
+#include "monitor_log.h"
 
 extern RTTStream rtt;
 
@@ -261,9 +262,9 @@ static bool loadFromFlash() {
         g_settings.profiles[0].refX = refX;
         g_settings.profiles[0].refY = calY;
         g_settings.profiles[0].refZ = calZ;
-        g_settings.profiles[0].createdAt = 0;
+        g_settings.profiles[0].createdAtEpoch = 0;
         g_settings.profiles[0].sampleCount = 0;
-        g_settings.profiles[0].qualityScore = 0;
+        g_settings.profiles[0].stabilityScore = 0.0f;
         g_settings.profiles[0].valid = 1;
 
         persist();  // migrate flash layout to v4
@@ -290,10 +291,11 @@ static bool loadFromFlash() {
 // ── Public API ─────────────────────────────────────────────────────────────
 void storageSetup() {
     if (loadFromFlash()) {
-        rtt.print("Storage: loaded, training delay = ");
-        rtt.println((int)g_settings.trainingDelay);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "{\"t\":\"STORAGE\",\"event\":\"loaded\",\"training_delay\":%u}", (unsigned)g_settings.trainingDelay);
+        logPacket("EVT", buf);
     } else {
-        rtt.println("Storage: empty, writing defaults");
+        logEvent("STORAGE", "empty_defaults");
         persist();
     }
     session_log_init();
@@ -323,8 +325,9 @@ uint8_t storageLoadTherapySubMode() {
 
 void storageSaveTherapySubMode(uint8_t idx) {
     saveTrainingDelay((TrainingDelay)idx);
-    rtt.print("Storage: saved training delay = ");
-    rtt.println((int)loadTrainingDelay());
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"t\":\"STORAGE\",\"event\":\"save_training_delay\",\"value\":%u}", (unsigned)loadTrainingDelay());
+    logPacket("EVT", buf);
 }
 
 bool storageLoadCalibration(float* y, float* z) {
@@ -342,7 +345,7 @@ void storageSaveCalibration(float y, float z) {
     g_settings.calY = y;
     g_settings.calZ = z;
     persist();
-    rtt.println("Storage: saved posture calibration");
+    logEvent("STORAGE", "saved_posture_calibration");
 }
 
 bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {

@@ -6,8 +6,8 @@ static const int MAX_SESSIONS = 120;
 static const uint8_t MAX_POSTURE_EVENTS = 64u;
 static const uint8_t MAX_THERAPY_PATTERNS = 30u;
 
-static const char* SESSION_FILE = "/sessions.dat";
-static const char* SESSION_EVENTS_FILE = "/sess_ev.dat";
+#define SESSION_FILE "/sessions.dat"
+#define SESSION_EVENTS_FILE "/sess_ev.dat"
 static const uint32_t SESSION_EVENT_MAGIC = 0x53455631u; // "SEV1"
 
 enum SessionType : uint8_t {

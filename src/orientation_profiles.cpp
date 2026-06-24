@@ -13,8 +13,8 @@ static uint32_t s_activeProfileId = 0;
 static uint32_t s_defaultProfileId = 0;
 
 static inline void copyProfileName(char* dst, const char* src) {
-    strncpy(dst, src, 15);
-    dst[15] = '\0';
+    strncpy(dst, src, 23);
+    dst[23] = '\0';
 }
 
 static void assignProfileDefaults(OrientationProfile& p) {
@@ -48,14 +48,6 @@ uint32_t getDefaultProfileId() { return s_defaultProfileId; }
 static void setOrientationLabel(const char* label) {
     strncpy(orientationText, label, sizeof(orientationText) - 1);
     orientationText[sizeof(orientationText) - 1] = '\0';
-}
-
-static void applyProfileSelectionByIndex(int index) {
-    if (index < 0 || index >= (int)s_profileCount) return;
-    s_activeProfileId = s_profiles[index].id;
-    storageSaveActiveProfileIndex(index);
-    setPostureOrigin3D(s_profiles[index].refX, s_profiles[index].refY, s_profiles[index].refZ);
-    setOrientationLabel(s_profiles[index].name);
 }
 
 void initProfiles() {
@@ -100,9 +92,9 @@ bool addCalibrationProfile(const char* name) {
     p.refX = getLastCalibratedX();
     p.refY = getLastCalibratedY();
     p.refZ = getLastCalibratedZ();
-    p.createdAt = millis();
+    p.createdAtEpoch = millis() / 1000UL;
     p.sampleCount = 0;
-    p.qualityScore = 0;
+    p.stabilityScore = 0.0f;
     storageSaveProfiles(s_profiles, s_profileCount);
     selectCalibrationProfileById(p.id);
     if (s_defaultProfileId == 0u) {
@@ -207,7 +199,7 @@ void addOrUpdateProfile0(float refX, float refY, float refZ) {
         p.refX = refX;
         p.refY = refY;
         p.refZ = refZ;
-        p.createdAt = millis();
+        p.createdAtEpoch = millis() / 1000UL;
         p.valid = 1;
         s_profileCount = 1;
         s_defaultProfileId = p.id;
