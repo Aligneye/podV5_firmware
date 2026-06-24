@@ -61,6 +61,21 @@ static constexpr uint8_t DISCONNECTION_HAPTIC_DUTY = 150;
 static constexpr uint16_t DISCONNECTION_HAPTIC_MS = 250;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
+static void rttPrintBlePacket(const char* direction, const char* payload) {
+    if (!direction || !payload) return;
+    rtt.print("[BLE ");
+    rtt.print(direction);
+    rtt.print("] ");
+    rtt.println(payload);
+}
+
+static void sendBlePacket(const char* payload) {
+    if (!pCharacteristic || !payload) return;
+    pCharacteristic->write(payload);
+    pCharacteristic->notify(payload);
+    rttPrintBlePacket("TX", payload);
+}
+
 static const char* bleDisconnectReasonText(uint8_t reason) {
     switch (reason) {
         case BLE_HCI_CONNECTION_TIMEOUT:
@@ -216,7 +231,7 @@ static void onBleConnect(uint16_t conn_handle) {
     lastLiveSendMs = 0;
     connectedSinceMs = millis();
     turnRgbLedOff();
-    rtt.println("BLE: Connected");
+    rtt.println("[BLE EVT] connected");
 }
 
 static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
@@ -228,7 +243,7 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     disconnectionHapticPending = true;
     forceLiveSync = false;
     connectedSinceMs = 0UL;
-    rtt.print("BLE: Disconnected reason=0x");
+    rtt.print("[BLE EVT] disconnected reason=0x");
     rtt.print(reason, HEX);
     rtt.print(" (");
     rtt.print(bleDisconnectReasonText(reason));
@@ -247,7 +262,7 @@ static void onBleSecured(uint16_t conn_handle) {
     blePairingKnownPaired = true;
     pairingUnlockActive = false;
     connectionHapticPending = true;
-    rtt.println("BLE: Paired/Secured");
+    rtt.println("[BLE EVT] secured");
 }
 
 static void applyTrainingTiming(const String &valueRaw) {
@@ -402,8 +417,7 @@ static void sendProfileList() {
     }
     strncat(profilesJson, "]", sizeof(profilesJson) - strlen(profilesJson) - 1);
     snprintf(payload, sizeof(payload), "{\"t\":\"P\",\"profiles\":%s,\"count\":%u,\"max\":8}", profilesJson, (unsigned)getProfileCount());
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
 }
 
 static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint8_t slot = 0, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr) {
@@ -418,8 +432,7 @@ static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char
                  "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"failed\",\"reason\":\"%s\"}",
                  reason ? reason : "ERROR");
     }
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
 }
 
 static void applyTimeSync(const String &valueRaw) {
@@ -609,14 +622,13 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
     }
 
 #if ALIGN_RTT_BLE_RX_LOG
-    rtt.print("BLE RX CMD: ");
-    rtt.println(payload);
+    rttPrintBlePacket("RX", payload.c_str());
 #endif
     parseAndApplyBleCommand(payload);
 }
 
 void bluetoothSetup() {
-    rtt.print("Initializing BLE as: ");
+    rtt.print("[BLE EVT] init ");
     rtt.println(BLE_DEVICE_NAME);
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_GREEN, OUTPUT);
@@ -645,7 +657,7 @@ void bluetoothSetup() {
         gCharacteristic.setMaxLen(512);
         gCharacteristic.setWriteCallback(onCharacteristicWrite);
         gCharacteristic.begin();
-        gCharacteristic.write("{}");
+        rttPrintBlePacket("TX", "{}");
 
         pCharacteristic = &gCharacteristic;
         bleInitialized = true;
@@ -758,8 +770,7 @@ void bluetoothLoop() {
                 profileName,
                 (unsigned)batteryPercentage
             );
-            pCharacteristic->write(telemetryBuffer);
-            pCharacteristic->notify(telemetryBuffer);
+            sendBlePacket(telemetryBuffer);
 #if ALIGN_RTT_JSON_LOG
             rtt.println(telemetryBuffer);
 #endif
@@ -783,8 +794,7 @@ void bluetoothLoop() {
                 currentAngle,
                 appPosture
             );
-            pCharacteristic->write(liveBuffer);
-            pCharacteristic->notify(liveBuffer);
+            sendBlePacket(liveBuffer);
 #if ALIGN_RTT_JSON_LOG
             rtt.println(liveBuffer);
 #endif
@@ -793,24 +803,26 @@ void bluetoothLoop() {
         }
     }
 
-    // Clean human-readable RTT status for day-to-day debugging.
+    // RTT mirror of the live packet stream. Keep this aligned with what the
+    // app would receive over BLE instead of the old free-form STATUS output.
 #if ALIGN_RTT_STATUS_LOG
     static unsigned long lastStatusMs = 0;
     if (!isCalibrating() && (now - lastStatusMs) >= ALIGN_RTT_STATUS_INTERVAL_MS) {
         lastStatusMs = now;
-        rtt.printf("STATUS mode=%s profile=%s profiles=%u angle=%s deg dir=%s posture=%s bad=%s batt_mv=%u batper_mv=%u batt_adc=%u batt_pct=%u steps=%lu\n",
-                   modeString,
-                   profileName,
-                   (unsigned)getProfileCount(),
-                   String(currentAngle, 1).c_str(),
-                   directionText,
-                   postureText,
-                   isBadPosture ? "Y" : "N",
-                   batteryMillivolts,
-                   batterySenseMillivolts,
-                   batteryRawAdc,
-                   batteryPercentage,
-                   (unsigned long)getDeviceStepCount());
+        char statusBuffer[192];
+        snprintf(statusBuffer, sizeof(statusBuffer),
+                 "{\"t\":\"S\",\"mode\":\"%s\",\"profile\":\"%s\",\"profiles\":%u,\"angle\":%.1f,\"dir\":\"%s\",\"posture\":\"%s\",\"bad\":%s,\"battery_mv\":%u,\"battery_pct\":%u,\"steps\":%lu}",
+                 modeString,
+                 profileName,
+                 (unsigned)getProfileCount(),
+                 currentAngle,
+                 directionText,
+                 postureText,
+                 isBadPosture ? "true" : "false",
+                 batteryMillivolts,
+                 batteryPercentage,
+                 (unsigned long)getDeviceStepCount());
+        rttPrintBlePacket("TX", statusBuffer);
     }
 #endif
 
@@ -851,8 +863,7 @@ void notifyCalibrationStatus(const char* calibrationResult, const char* complete
              safeComplete,
              (unsigned long)elapsed,
              (unsigned long)total);
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
 }
 
 void notifyDfuStatus(const char* status) {
@@ -864,8 +875,7 @@ void notifyDfuStatus(const char* status) {
     snprintf(payload, sizeof(payload),
              "{\"t\":\"D\",\"status\":\"%s\"}",
              (status && status[0] != '\0') ? status : "unknown");
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
 }
 
 void notifyDeviceInfo() {
@@ -880,17 +890,16 @@ void notifyDeviceInfo() {
              HW_VERSION,
              FW_VERSION,
              FW_BUILD_DATE);
-    pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    sendBlePacket(payload);
 }
 
 void bluetoothStartAdvertising() {
-    rtt.println("BLE: start advertising");
+    rtt.println("[BLE EVT] start advertising");
     startAdvertising();
 }
 
 void bluetoothStopAdvertising() {
-    rtt.println("BLE: stop advertising");
+    rtt.println("[BLE EVT] stop advertising");
     Bluefruit.Advertising.stop();
 }
 
@@ -899,7 +908,7 @@ bool bluetoothIsConnected() {
 }
 
 void bluetoothUnlockForPairing() {
-    rtt.println("BLE: unlock pairing - clearing bonds");
+    rtt.println("[BLE EVT] unlock pairing - clearing bonds");
 
     batteryBlinkActive = false;
     pairingUnlockActive = true;
