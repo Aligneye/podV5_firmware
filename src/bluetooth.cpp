@@ -403,9 +403,12 @@ static void sendProfileList() {
     for (uint8_t i = 0; i < getProfileCount(); i++) {
         const OrientationProfile* p = getProfile(i);
         if (!p || !p->valid) continue;
+        int quality = (int)(p->stabilityScore);
+        if (quality < 0) quality = 0;
+        if (quality > 100) quality = 100;
         char item[192];
         snprintf(item, sizeof(item),
-                 "%s{\"id\":%lu,\"slot\":%u,\"name\":\"%s\",\"valid\":true,\"active\":%s,\"default\":%s,\"created\":%lu,\"quality\":%.1f}",
+                 "%s{\"id\":%lu,\"slot\":%u,\"name\":\"%s\",\"valid\":true,\"active\":%s,\"default\":%s,\"created\":%lu,\"quality\":%d}",
                  (profilesJson[1] == '\0') ? "" : ",",
                  (unsigned long)p->id,
                  (unsigned)(i + 1),
@@ -413,7 +416,7 @@ static void sendProfileList() {
                  (getActiveProfile() && getActiveProfile()->id == p->id) ? "true" : "false",
                  (getDefaultProfileId() == p->id) ? "true" : "false",
                  (unsigned long)p->createdAtEpoch,
-                 p->stabilityScore);
+                 quality);
         strncat(profilesJson, item, sizeof(profilesJson) - strlen(profilesJson) - 1);
     }
     strncat(profilesJson, "]", sizeof(profilesJson) - strlen(profilesJson) - 1);
@@ -431,9 +434,13 @@ static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char
     } else {
         snprintf(payload, sizeof(payload),
                  "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"failed\",\"reason\":\"%s\"}",
-                 reason ? reason : "ERROR");
+                 reason ? reason : "MOVEMENT_TOO_HIGH");
     }
     sendBlePacket(payload);
+}
+
+void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint8_t slot, uint16_t quality, uint16_t sampleCount, const char* reason) {
+    sendCalibrationDone(success, profileId, name, slot, quality, sampleCount, reason);
 }
 
 static void applyTimeSync(const String &valueRaw) {

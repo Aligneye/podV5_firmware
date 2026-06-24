@@ -51,6 +51,17 @@ static float s_lastCalibratedY = 0.0f;
 static float s_lastCalibratedZ = 0.0f;
 static bool  s_lastCalibrationValid = false;
 
+static uint16_t computeCalibrationQuality(uint32_t sampleCount, const CalibrationStats& stats) {
+    float spread = (stats.stdDevX + stats.stdDevY + stats.stdDevZ) / 3.0f;
+    float quality = 100.0f - (spread * 25.0f);
+    if (sampleCount < MIN_VALID_SAMPLES) {
+        quality -= 15.0f;
+    }
+    if (quality < 0.0f) quality = 0.0f;
+    if (quality > 100.0f) quality = 100.0f;
+    return (uint16_t)(quality + 0.5f);
+}
+
 struct CalibrationStats {
     float meanX;
     float meanY;
@@ -104,11 +115,28 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     // Log exact formats
     rtt.println("CALIBRATION: DONE");
 
+    CalibrationStats finalStats = calculateCalibrationStats(totalSamples);
+    const uint16_t quality = computeCalibrationQuality((uint32_t)totalSamples, finalStats);
+
+    const uint32_t profileIdBeforeSave = (getActiveProfile() ? getActiveProfile()->id : 0u);
+    const int activeIndexBeforeSave = getActiveProfileIndex();
+    const uint8_t slotBeforeSave = (activeIndexBeforeSave >= 0) ? (uint8_t)(activeIndexBeforeSave + 1) : 0u;
+
     if (!addNextCalibrationProfile()) {
         rtt.println("CALIBRATION: PROFILE SAVE FAILED");
         notifyCalibrationStatus("failed", "done");
+        notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, "MOVEMENT_TOO_HIGH");
     } else {
+        const OrientationProfile* active = getActiveProfile();
+        const uint32_t profileId = active ? active->id : 0u;
         notifyCalibrationStatus("success", "done");
+        notifyCalibrationComplete(true,
+                                  profileId ? profileId : profileIdBeforeSave,
+                                  active ? active->name : "",
+                                  slotBeforeSave,
+                                  quality,
+                                  (uint16_t)totalSamples,
+                                  nullptr);
     }
 
     // Start this after profile storage so flash writes cannot stretch the pulse.
