@@ -336,27 +336,59 @@ void therapyLoop() {
 }
 
 bool therapyIsRunning() {
-    return therapyState == THERAPY_RUNNING;
+    return currentMode == MODE_THERAPY && therapyState == THERAPY_RUNNING;
 }
 
 unsigned long therapyGetElapsedMs() {
-    if (therapyState != THERAPY_RUNNING || currentMode != MODE_THERAPY) return 0;
+    if (!therapyIsRunning()) return 0;
     return millis() - therapyStartMs;
 }
 
 unsigned long therapyGetRemainingMs() {
-    if (therapyState != THERAPY_RUNNING || currentMode != MODE_THERAPY) return 0;
+    if (!therapyIsRunning()) return 0;
+
     unsigned long elapsed = millis() - therapyStartMs;
     if (elapsed >= therapyDurationMs) return 0;
+
     return therapyDurationMs - elapsed;
 }
 
+unsigned long therapyGetElapsedSeconds() {
+    return therapyGetElapsedMs() / 1000UL;
+}
+
+unsigned long therapyGetRemainingSeconds() {
+    return therapyGetRemainingMs() / 1000UL;
+}
+
+uint8_t therapyGetCurrentPatternIndex() {
+    if (!therapyIsRunning()) return 0;
+    return (uint8_t)(currentPatternIndex + 1);  // 1-based for app UI
+}
+
+uint8_t therapyGetTotalPatternCount() {
+    if (!therapyIsRunning()) return 0;
+    return (uint8_t)totalPatterns;
+}
+
 const char* therapyGetCurrentPatternName() {
-    if (!patternsInitialized || currentPatternIndex >= totalPatterns) return "Unknown";
+    if (!therapyIsRunning() || !patternsInitialized || currentPatternIndex >= totalPatterns) {
+        return "";
+    }
+
     return PATTERN_NAMES[patternSequence[currentPatternIndex]];
 }
 
 const char* therapyGetNextPatternName() {
-    if (!patternsInitialized || currentPatternIndex + 1 >= totalPatterns) return "Complete";
-    return PATTERN_NAMES[patternSequence[currentPatternIndex + 1]];
+    if (!therapyIsRunning() || !patternsInitialized) {
+        return "";
+    }
+
+    int nextIndex = currentPatternIndex + 1;
+
+    if (nextIndex >= totalPatterns) {
+        return "Complete";
+    }
+
+    return PATTERN_NAMES[patternSequence[nextIndex]];
 }
