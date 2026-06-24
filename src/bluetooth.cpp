@@ -37,6 +37,7 @@ static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
 static unsigned long connectedSinceMs = 0;
 static volatile bool pendingDfuEnter = false;
+static volatile bool pendingProfileListSend = false;
 
 static BLEService gService(BLE_SERVICE_UUID);
 static BLECharacteristic gCharacteristic(BLE_CHARACTERISTIC_UUID);
@@ -378,6 +379,49 @@ static void applyAction(const String &valueRaw) {
     }
 }
 
+static void sendProfileList() {
+    if (!pCharacteristic || !connected) return;
+    char payload[1024];
+    char profilesJson[768];
+    profilesJson[0] = '\0';
+    strncat(profilesJson, "[", sizeof(profilesJson) - 1);
+    for (uint8_t i = 0; i < getProfileCount(); i++) {
+        const OrientationProfile* p = getProfile(i);
+        if (!p || !p->valid) continue;
+        char item[192];
+        snprintf(item, sizeof(item),
+                 "%s{\"id\":%lu,\"name\":\"%s\",\"refX\":%.3f,\"refY\":%.3f,\"refZ\":%.3f,\"createdAt\":%lu,\"sample_count\":%u,\"quality\":%u,\"valid\":true}",
+                 (profilesJson[1] == '\0') ? "" : ",",
+                 (unsigned long)p->id,
+                 p->name,
+                 p->refX, p->refY, p->refZ,
+                 (unsigned long)p->createdAt,
+                 (unsigned)p->sampleCount,
+                 (unsigned)p->qualityScore);
+        strncat(profilesJson, item, sizeof(profilesJson) - strlen(profilesJson) - 1);
+    }
+    strncat(profilesJson, "]", sizeof(profilesJson) - strlen(profilesJson) - 1);
+    snprintf(payload, sizeof(payload), "{\"t\":\"P\",\"profiles\":%s,\"count\":%u,\"max\":8}", profilesJson, (unsigned)getProfileCount());
+    pCharacteristic->write(payload);
+    pCharacteristic->notify(payload);
+}
+
+static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint8_t slot = 0, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr) {
+    if (!pCharacteristic || !connected) return;
+    char payload[256];
+    if (success) {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"profile_id\":%lu,\"slot\":%u,\"name\":\"%s\",\"quality\":%u,\"sample_count\":%u}",
+                 (unsigned long)profileId, (unsigned)slot, name ? name : "", (unsigned)quality, (unsigned)samples);
+    } else {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"failed\",\"reason\":\"%s\"}",
+                 reason ? reason : "ERROR");
+    }
+    pCharacteristic->write(payload);
+    pCharacteristic->notify(payload);
+}
+
 static void applyTimeSync(const String &valueRaw) {
     String value = valueRaw;
     value.trim();
@@ -460,6 +504,28 @@ static void applyProfileSelection(const String &valueRaw) {
     rtt.printf("BLE CMD: PROFILE=%s ignored\n", value.c_str());
 }
 
+static void applyProfileCommand(const String& valueRaw) {
+    String value = valueRaw;
+    value.trim();
+    if (value.startsWith("SET_DEFAULT;id=")) {
+        uint32_t id = (uint32_t)value.substring(14).toInt();
+        setProfileDefaultById(id);
+    } else if (value.startsWith("SELECT;id=")) {
+        uint32_t id = (uint32_t)value.substring(10).toInt();
+        selectCalibrationProfileById(id);
+    } else if (value.startsWith("RENAME;id=")) {
+        int namePos = value.indexOf(";name=");
+        uint32_t id = (uint32_t)value.substring(10, namePos).toInt();
+        String newName = value.substring(namePos + 6);
+        renameCalibrationProfileById(id, newName.c_str());
+    } else if (value.startsWith("DELETE;id=")) {
+        uint32_t id = (uint32_t)value.substring(10).toInt();
+        deleteCalibrationProfileById(id);
+    } else if (value == "CLEAR_ALL") {
+        clearCalibrationProfiles();
+    }
+}
+
 static void parseAndApplyBleCommand(const String &payloadRaw) {
     String payload = payloadRaw;
     payload.trim();
@@ -495,8 +561,23 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 applyTherapyIntensity(value);
             } else if (key == "DIFFICULTY_DEG") {
                 applyDifficultyDegrees(value);
-            } else if (key == "PROFILE" || key == "PROFILE_INDEX" || key == "PROFILES") {
+            } else if (key == "CMD" && value == "GET_PROFILES") {
+                pendingProfileListSend = true;
+            } else if (key == "CALIBRATE_START") {
+                if (value.startsWith("slot=auto")) {
+                    if (value.indexOf(";name=") >= 0) {
+                        String name = value.substring(value.indexOf(";name=") + 6);
+                        addCalibrationProfile(name.c_str());
+                    } else {
+                        addNextCalibrationProfile();
+                    }
+                }
+            } else if (key == "CALIBRATE_CANCEL") {
+                requestCalibrationCancel();
+            } else if (key == "PROFILE") {
                 applyProfileSelection(value);
+            } else if (key == "PROFILE_SET_DEFAULT" || key == "PROFILE_SELECT" || key == "PROFILE_RENAME" || key == "PROFILE_DELETE" || key == "PROFILE_CLEAR_ALL") {
+                applyProfileCommand(key + "=" + value);
             } else if (key == "CALIBRATE" || key == "CALIBRATION") {
                 applyCalibrationControl(value);
             } else if (key == "ACTION") {
@@ -575,6 +656,11 @@ void bluetoothSetup() {
 
 void bluetoothLoop() {
     if (!pCharacteristic) return;
+
+    if (pendingProfileListSend && connected) {
+        pendingProfileListSend = false;
+        sendProfileList();
+    }
 
     if (pendingDfuEnter) {
         pendingDfuEnter = false;

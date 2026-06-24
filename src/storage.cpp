@@ -24,7 +24,7 @@ using namespace Adafruit_LittleFS_Namespace;
 // this project place the application well below this address.
 static constexpr uint32_t SETTINGS_PAGE_ADDR = 0x00073000UL;
 static constexpr uint32_t SETTINGS_MAGIC     = 0x414C4733UL;  // "ALG3"
-static constexpr uint16_t SETTINGS_VERSION   = 4u;
+static constexpr uint16_t SETTINGS_VERSION   = 5u;
 
 struct PersistedSettingsV1 {
     uint32_t magic;
@@ -51,6 +51,8 @@ struct PersistedSettings {
     float     calZ;
     uint8_t            profileCount;
     uint8_t            reserved2[3];
+    uint32_t           nextProfileId;
+    uint32_t           defaultProfileId;
     OrientationProfile profiles[8];
 };
 
@@ -63,6 +65,8 @@ static PersistedSettings g_settings = {
     6.75f,
     0u,
     {0, 0, 0},
+    1u,
+    0u,
     {}
 };
 
@@ -95,6 +99,15 @@ static uint8_t decodeStoredNextOverwriteIndex() {
     const uint8_t stored = g_settings.reserved2[1];
     if (stored >= ACTIVE_PROFILE_MAX_STORED) return NEXT_OVERWRITE_DEFAULT;
     return stored;
+}
+
+static uint32_t decodeStoredNextProfileId() {
+    if (g_settings.nextProfileId == 0u) return 1u;
+    return g_settings.nextProfileId;
+}
+
+static uint32_t decodeStoredDefaultProfileId() {
+    return g_settings.defaultProfileId;
 }
 
 #if PROFILE_STORE_HAS_FS
@@ -239,13 +252,19 @@ static bool loadFromFlash() {
         g_settings.calZ = calZ;
         g_settings.profileCount = 1;
         memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+        g_settings.nextProfileId = 2u;
+        g_settings.defaultProfileId = 0u;
 
+        g_settings.profiles[0].id = 1u;
         strncpy(g_settings.profiles[0].name, "Default Vertical", sizeof(g_settings.profiles[0].name) - 1);
         g_settings.profiles[0].name[sizeof(g_settings.profiles[0].name) - 1] = '\0';
         g_settings.profiles[0].refX = refX;
         g_settings.profiles[0].refY = calY;
         g_settings.profiles[0].refZ = calZ;
         g_settings.profiles[0].createdAt = 0;
+        g_settings.profiles[0].sampleCount = 0;
+        g_settings.profiles[0].qualityScore = 0;
+        g_settings.profiles[0].valid = 1;
 
         persist();  // migrate flash layout to v4
         return true;
@@ -260,6 +279,7 @@ static bool loadFromFlash() {
     }
 
     g_settings = *flash;
+    if (g_settings.nextProfileId == 0u) g_settings.nextProfileId = 1u;
     if (fabsf(g_settings.calY) < 0.1f && fabsf(g_settings.calZ) < 0.1f) {
         g_settings.calY = 6.75f;
         g_settings.calZ = 6.75f;
@@ -401,6 +421,33 @@ void storageSaveNextProfileOverwriteIndex(uint8_t index) {
     if (g_settings.reserved2[1] == index) return;
 
     g_settings.reserved2[1] = index;
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return;
+#endif
+    persist();
+}
+
+uint32_t storageLoadDefaultProfileId() {
+    return decodeStoredDefaultProfileId();
+}
+
+void storageSaveDefaultProfileId(uint32_t id) {
+    if (g_settings.defaultProfileId == id) return;
+    g_settings.defaultProfileId = id;
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return;
+#endif
+    persist();
+}
+
+uint32_t storageLoadNextProfileId() {
+    return decodeStoredNextProfileId();
+}
+
+void storageSaveNextProfileId(uint32_t id) {
+    if (id == 0u) id = 1u;
+    if (g_settings.nextProfileId == id) return;
+    g_settings.nextProfileId = id;
 #if PROFILE_STORE_HAS_FS
     if (writeProfileStore()) return;
 #endif
