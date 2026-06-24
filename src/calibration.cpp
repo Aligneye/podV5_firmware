@@ -5,6 +5,7 @@
 #include "therapy.h"
 #include "training.h"
 #include "storage.h"
+#include "monitor_log.h"
 #include <math.h>
 #include <string.h>
 
@@ -14,7 +15,7 @@ extern RTTStream rtt;
 enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };
 static CalibState calibState = CALIB_STATE_IDLE;
 
-static constexpr uint32_t CALIB_GET_READY_MS       = 2000UL;
+static constexpr uint32_t CALIB_GET_READY_MS       = 3000UL;
 static constexpr uint32_t CALIB_HOLD_MS            = 5000UL;
 static constexpr uint32_t CALIB_TOTAL_MS           = CALIB_GET_READY_MS + CALIB_HOLD_MS;
 static constexpr uint32_t CALIB_RESULT_BROADCAST_MS = 4000UL;
@@ -80,6 +81,11 @@ static const char* calibrationQualityLabel(uint16_t quality) {
     return "Fail";
 }
 
+static void calibrationStartBlocked(const char* reason) {
+    logPacket("CALIB", reason ? reason : "START_BLOCKED");
+    notifyCalibrationComplete(false, 0u, "", 0u, 0u, 0u, reason ? reason : "START_BLOCKED");
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 static void goToTrainingMode() {
     deviceOn = true;
@@ -99,11 +105,13 @@ static void calibrationFail(const char* reason) {
 
     s_lastCalibrationValid = false;
 
-    // Exact console log format: "CALIB: BAD MOVEMENT - Failed" or generic "CALIBRATION FAILED: <reason>"
+    // Exact console log format: structured RTT packet
     if (strcmp(reason, "Bad movement") == 0 || strcmp(reason, "Too much movement") == 0) {
-        rtt.println("CALIB: BAD MOVEMENT - Failed");
+        logEvent("CALIB", "bad_movement_failed");
     } else {
-        rtt.printf("CALIBRATION FAILED: %s\n", reason);
+        char payload[80];
+        snprintf(payload, sizeof(payload), "{\"event\":\"failed\",\"reason\":\"%s\"}", reason);
+        logPacket("CALIB", payload);
     }
     notifyCalibrationStatus("failed", "done");
 
@@ -121,8 +129,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     s_lastCalibratedZ = avgZ;
     s_lastCalibrationValid = true;
 
-    // Log exact formats
-    rtt.println("CALIBRATION: DONE");
+    logEvent("CALIB", "done");
 
     CalibrationStats finalStats = calculateCalibrationStats(totalSamples);
     const uint16_t quality = computeCalibrationQuality((uint32_t)totalSamples, finalStats);
@@ -133,17 +140,19 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
     const uint8_t slotBeforeSave = (activeIndexBeforeSave >= 0) ? (uint8_t)(activeIndexBeforeSave + 1) : 0u;
 
     if (quality < 50) {
-        rtt.println("CALIBRATION: QUALITY TOO LOW");
+        logEvent("CALIB", "quality_too_low");
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", 0u, quality, (uint16_t)totalSamples, "LOW_QUALITY");
     } else if (!addNextCalibrationProfile()) {
-        rtt.println("CALIBRATION: PROFILE SAVE FAILED");
+        logEvent("CALIB", "profile_save_failed");
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, "MOVEMENT_TOO_HIGH");
     } else {
         const OrientationProfile* active = getActiveProfile();
         const uint32_t profileId = active ? active->id : 0u;
-        rtt.printf("CALIBRATION QUALITY: %s (%u%%)\n", qualityLabel, (unsigned)quality);
+        char payload[96];
+        snprintf(payload, sizeof(payload), "{\"quality\":\"%s\",\"value\":%u}", qualityLabel, (unsigned)quality);
+        logPacket("CALIB", payload);
         notifyCalibrationStatus("success", "done");
         notifyCalibrationComplete(true,
                                   profileId ? profileId : profileIdBeforeSave,
@@ -389,6 +398,27 @@ void startCalibration() {
         return;
     }
 
+    if (!bluetoothIsConnected()) {
+        calibrationStartBlocked("DEVICE_NOT_CONNECTED");
+        return;
+    }
+    if (!sensorInitialized) {
+        calibrationStartBlocked("SENSOR_NOT_INITIALIZED");
+        return;
+    }
+    if (bluetoothGetBatteryPercentage() < 10u) {
+        calibrationStartBlocked("LOW_BATTERY");
+        return;
+    }
+    if (therapyIsRunning() || bluetoothIsMotorActive()) {
+        calibrationStartBlocked("MOTOR_ACTIVE");
+        return;
+    }
+    if (isDeviceMoving()) {
+        calibrationStartBlocked("DEVICE_MOVING");
+        return;
+    }
+
     lastCalibrationResult[0] = '\0';
     calibResultSetAt = 0;
 
@@ -410,16 +440,16 @@ void startCalibration() {
 
     s_lastSampleTime = millis();
 
-    rtt.println("CALIBRATION: START");
+    logEvent("CALIB", "start");
     notifyCalibrationStatus("", "");
-    rtt.println("CALIBRATION: GET READY - 2 sec");
+    logPacket("CALIB", "{\"phase\":\"GET_READY\",\"seconds\":3}");
 }
 
 void cancelCalibration() {
     if (calibState == CALIB_STATE_IDLE) {
         return;
     }
-    rtt.println("CALIBRATION: CANCELLED");
+    logEvent("CALIB", "cancelled");
     notifyCalibrationStatus("cancelled", "done");
     calibState = CALIB_STATE_IDLE;
     motorSetDuty(0);

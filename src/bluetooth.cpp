@@ -8,6 +8,7 @@
 #include "session_stats.h"
 #include "BatteryMonitor.h"
 #include "version.h"
+#include "monitor_log.h"
 #include <bluefruit.h>
 #include <ble_hci.h>
 #if __has_include(<InternalFileSystem.h>)
@@ -342,11 +343,11 @@ static void applyMode(const String &valueRaw) {
         if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
             markSubModeChanged();
         }
-        rtt.println("BLE CMD: MODE=TRAINING");
+        logEvent("BLE", "mode_training");
     } else if (value == "THERAPY") {
         deviceOn = true;
         setDeviceMode(MODE_THERAPY);
-        rtt.println("BLE CMD: MODE=THERAPY");
+        logEvent("BLE", "mode_therapy");
     }
 }
 
@@ -358,11 +359,11 @@ static void applyCalibrationControl(const String &valueRaw) {
     if (value == "START") {
         if (isCalibrating()) return;
         calibrationRequestStart();
-        rtt.println("BLE CMD: CALIBRATION START");
+        logEvent("BLE", "calibration_start");
     } else if (value == "CANCEL") {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
-        rtt.println("BLE CMD: CALIBRATION CANCEL");
+        logEvent("BLE", "calibration_cancel");
     }
 }
 
@@ -375,22 +376,22 @@ static void applyAction(const String &valueRaw) {
         if (isCalibrating()) return;
         deviceOn = true;
         startCalibration();
-        rtt.println("BLE CMD: ACTION=CALIBRATE");
+        logEvent("BLE", "action_calibrate");
     } else if (value == "CALIBRATE_CANCEL") {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
-        rtt.println("BLE CMD: ACTION=CALIBRATE_CANCEL");
+        logEvent("BLE", "action_calibrate_cancel");
     } else if (value == "ENTER_DFU" || value == "OTA_DFU" || value == "DFU") {
         if (pendingDfuEnter) return;
         pendingDfuEnter = true;
         notifyDfuStatus("armed");
-        rtt.println("BLE CMD: ACTION=ENTER_DFU");
+        logEvent("BLE", "action_enter_dfu");
     } else if (value == "DEVICE_INFO" || value == "GET_VERSION" || value == "VERSION") {
         notifyDeviceInfo();
-        rtt.println("BLE CMD: ACTION=DEVICE_INFO");
+        logEvent("BLE", "action_device_info");
     } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
         clearCalibrationProfiles();
-        rtt.println("BLE CMD: ACTION=PROFILE_CLEAR");
+        logEvent("BLE", "action_profile_clear");
     }
 }
 
@@ -449,7 +450,9 @@ static void applyTimeSync(const String &valueRaw) {
     long epoch = value.toInt();
     if (epoch > 0) {
         setDeviceTime(epoch);
-        rtt.printf("BLE CMD: TIME=%ld\n", epoch);
+        char payload[48];
+        snprintf(payload, sizeof(payload), "{\"time\":%ld}", epoch);
+        logPacket("BLE", payload);
     }
 }
 
@@ -458,7 +461,9 @@ static void applyTZOffset(const String &valueRaw) {
     value.trim();
     long tz = value.toInt();
     setDeviceTZOffset(tz);
-    rtt.printf("BLE CMD: TZ=%ld\n", tz);
+    char payload[48];
+    snprintf(payload, sizeof(payload), "{\"tz\":%ld}", tz);
+    logPacket("BLE", payload);
 }
 
 static void applyTherapyIntensity(const String &valueRaw) {
@@ -467,7 +472,9 @@ static void applyTherapyIntensity(const String &valueRaw) {
     int level = value.toInt();
     if (level >= 1 && level <= 3) {
         therapyIntensityLevel = level;
-        rtt.printf("BLE CMD: THERAPY_INTENSITY=%d\n", level);
+        char payload[48];
+        snprintf(payload, sizeof(payload), "{\"therapy_intensity\":%d}", level);
+        logPacket("BLE", payload);
     }
 }
 
@@ -477,7 +484,9 @@ static void applyDifficultyDegrees(const String &valueRaw) {
     int deg = value.toInt();
     if (deg >= 5 && deg <= 60) {
         kBadPostureDeg = (float)deg;
-        rtt.printf("BLE CMD: DIFFICULTY_DEG=%d\n", deg);
+        char payload[48];
+        snprintf(payload, sizeof(payload), "{\"difficulty_deg\":%d}", deg);
+        logPacket("BLE", payload);
     }
 }
 
@@ -490,22 +499,26 @@ static void applyProfileSelection(const String &valueRaw) {
     upper.toUpperCase();
     if (upper == "CLEAR" || upper == "RESET") {
         clearCalibrationProfiles();
-        rtt.println("BLE CMD: PROFILE=CLEAR");
+        logEvent("BLE", "profile_clear");
         return;
     }
 
     if (upper == "DEFAULT") {
         selectDefaultCalibrationProfile();
-        rtt.println("BLE CMD: PROFILE=DEFAULT");
+        logEvent("BLE", "profile_default");
         return;
     }
 
     int requestedIndex = value.toInt();
     if (requestedIndex > 0) {
         if (selectCalibrationProfile((uint8_t)(requestedIndex - 1))) {
-            rtt.printf("BLE CMD: PROFILE_INDEX=%d\n", requestedIndex);
+            char payload[64];
+            snprintf(payload, sizeof(payload), "{\"profile_index\":%d}", requestedIndex);
+            logPacket("BLE", payload);
         } else {
-            rtt.printf("BLE CMD: PROFILE_INDEX=%d ignored\n", requestedIndex);
+            char payload[80];
+            snprintf(payload, sizeof(payload), "{\"profile_index\":%d,\"ignored\":true}", requestedIndex);
+            logPacket("BLE", payload);
         }
         return;
     }
@@ -517,12 +530,16 @@ static void applyProfileSelection(const String &valueRaw) {
         profileName.toUpperCase();
         if (upper == profileName) {
             selectCalibrationProfile(i);
-            rtt.printf("BLE CMD: PROFILE=%s\n", profile->name);
+            char payload[96];
+            snprintf(payload, sizeof(payload), "{\"profile\":\"%s\"}", profile->name);
+            logPacket("BLE", payload);
             return;
         }
     }
 
-    rtt.printf("BLE CMD: PROFILE=%s ignored\n", value.c_str());
+    char payload[128];
+    snprintf(payload, sizeof(payload), "{\"profile\":\"%s\",\"ignored\":true}", value.c_str());
+    logPacket("BLE", payload);
 }
 
 static void applyProfileCommand(const String& valueRaw) {
@@ -555,7 +572,6 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
     String requestedMode = "";
     String cmdName = "";
     String cmdParams[4];
-    uint8_t cmdParamCount = 0;
     int start = 0;
     int payloadLen = payload.length();
     while (start < payloadLen) {
@@ -947,6 +963,14 @@ void notifyDeviceInfo() {
              FW_VERSION,
              FW_BUILD_DATE);
     sendBlePacket(payload);
+}
+
+uint8_t bluetoothGetBatteryPercentage() {
+    return batteryPercentage;
+}
+
+bool bluetoothIsMotorActive() {
+    return motorIsActive();
 }
 
 void bluetoothStartAdvertising() {

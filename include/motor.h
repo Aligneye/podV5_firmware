@@ -9,3 +9,4 @@ void motorOverrideDuty(uint8_t duty, uint16_t durationMs); // temporary priority
 void motorStartCalmHaptic(uint16_t durationMs = 180);
 void motorCancelCalmHaptic();
 void motorCancelFeedback();
+bool motorIsActive();
