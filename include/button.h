@@ -11,7 +11,7 @@ extern bool deviceOn;
 enum Mode {
     MODE_TRAINING = 0,
     MODE_THERAPY,
-    MODE_OFF,
+    MODE_IDLE,
     MODE_COUNT
 };
 

@@ -511,13 +511,13 @@ static void sendProfileList() {
     sendBlePacket(payload);
 }
 
-static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint8_t slot = 0, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr) {
+static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint8_t slot = 0, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr, float refX = 0.0f, float refY = 0.0f, float refZ = 0.0f, uint16_t passedSamples = 0) {
     if (!pCharacteristic || !connected) return;
     char payload[256];
     if (success) {
         snprintf(payload, sizeof(payload),
-                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"profile_id\":%lu,\"slot\":%u,\"name\":\"%s\",\"quality\":%u,\"sample_count\":%u}",
-                 (unsigned long)profileId, (unsigned)slot, name ? name : "", (unsigned)quality, (unsigned)samples);
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"profile_id\":%lu,\"name\":\"%s\",\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"total_samples\":%u,\"passed_samples\":%u}",
+                 (unsigned long)profileId, name ? name : "", refX, refY, refZ, (unsigned)samples, (unsigned)passedSamples);
     } else {
         snprintf(payload, sizeof(payload),
                  "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"failed\",\"reason\":\"%s\"}",
@@ -526,8 +526,8 @@ static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char
     sendBlePacket(payload);
 }
 
-void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint8_t slot, uint16_t quality, uint16_t sampleCount, const char* reason) {
-    sendCalibrationDone(success, profileId, name, slot, quality, sampleCount, reason);
+void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint8_t slot, uint16_t quality, uint16_t sampleCount, const char* reason, float refX, float refY, float refZ, uint16_t passedSamples) {
+    sendCalibrationDone(success, profileId, name, slot, quality, sampleCount, reason, refX, refY, refZ, passedSamples);
 }
 
 static void applyTimeSync(const String &valueRaw) {
@@ -1006,8 +1006,8 @@ void bluetoothLoop() {
         modeString = (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) ? "TRACKING" : "TRAINING";
     } else if (currentMode == MODE_THERAPY) {
         modeString = "THERAPY";
-    } else if (currentMode == MODE_OFF) {
-        modeString = "OFF";
+    } else if (currentMode == MODE_IDLE) {
+        modeString = "IDLE";
     }
 
     updateBatteryReading(now);

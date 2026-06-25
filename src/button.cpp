@@ -20,7 +20,7 @@
 extern RTTStream rtt;
 
 // ── Name arrays ────────────────────────────────────────────────────────────
-const char *modeNames[] = {"Training Mode", "Therapy Mode", "OFF Mode", "DFU Mode"};
+const char *modeNames[] = {"Training Mode", "Therapy Mode", "Idle Mode", "DFU Mode"};
 const char *trainingSubModes[] = {"Instant", "Delayed", "No alerts"};
 const char *therapySubModes[] = {"10 min", "20 min", "30 min"};
 
@@ -32,7 +32,7 @@ uint8_t therapySubModeIndex = 0;
 unsigned long lastModeChangeMs = 0;
 unsigned long lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
-static bool offPrinted = true;
+static bool idlePrinted = true;
 static bool trainingStarted = true;
 
 // OneButton instance: active LOW, internal pull-up enabled
@@ -76,11 +76,11 @@ void setDeviceMode(Mode newMode) {
   lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
   // 3. Reset state flags
-  if (currentMode == MODE_OFF) {
-    offPrinted = false;
+  if (currentMode == MODE_IDLE) {
+    idlePrinted = false;
   } else if (currentMode == MODE_TRAINING) {
     trainingStarted = false;
-    if (previousMode == MODE_OFF) {
+    if (previousMode == MODE_IDLE) {
       bluetoothRequestBatteryStatusBlink();
     }
   }
@@ -89,7 +89,7 @@ void setDeviceMode(Mode newMode) {
 static void handleSingleClick() {
   if (isCalibrating()) {
     DEBUG_PRINTLN("Button click detected during calibration - canceling");
-    setDeviceMode(MODE_TRAINING);
+    calibrationRequestCancel();
     return;
   }
 
@@ -103,7 +103,7 @@ static void handleDoubleClick() {
 
   if (isCalibrating()) {
     DEBUG_PRINTLN("Button double-click detected during calibration - canceling");
-    setDeviceMode(MODE_TRAINING);
+    calibrationRequestCancel();
     return;
   }
 
@@ -128,8 +128,8 @@ static void handleDoubleClick() {
     DEBUG_PRINTLN(therapySubModes[therapySubModeIndex]);
     break;
 
-  case MODE_OFF:
-    DEBUG_PRINTLN("Entering OTA DFU from OFF mode");
+  case MODE_IDLE:
+    DEBUG_PRINTLN("Entering OTA DFU from IDLE mode");
     setDeviceMode((Mode)MODE_DFU);
     notifyDfuStatus("armed");
     logEvent("DFU", "entering_ota_bootloader");
@@ -152,12 +152,12 @@ static void handleMultiClick() {
 
   if (isCalibrating()) {
     DEBUG_PRINTLN("Button triple-click detected during calibration - canceling");
-    setDeviceMode(MODE_TRAINING);
+    calibrationRequestCancel();
     return;
   }
 
-  if (currentMode != MODE_OFF) {
-    DEBUG_PRINTLN("Triple click ignored outside OFF mode");
+  if (currentMode != MODE_IDLE) {
+    DEBUG_PRINTLN("Triple click ignored outside IDLE mode");
     return;
   }
 
@@ -169,11 +169,6 @@ static void handleHold() {
 
   if (isCalibrating()) {
     DEBUG_PRINTLN("Button hold detected during calibration - ignoring");
-    return;
-  }
-
-  if (currentMode == MODE_OFF) {
-    DEBUG_PRINTLN("Hold ignored in OFF mode");
     return;
   }
 
@@ -198,7 +193,7 @@ void buttonSetup() {
   DEBUG_PRINTLN("Device ON");
   currentMode = MODE_TRAINING;
   trainingStarted = false;
-  offPrinted = true;
+  idlePrinted = true;
 }
 
 void buttonLoop() {
@@ -207,9 +202,9 @@ void buttonLoop() {
   bool isTransitioning = (millis() - lastModeChangeMs < lastModeChangeDelayMs);
 
   if (!isTransitioning) {
-    if (currentMode == MODE_OFF && !offPrinted) {
-      logEvent("MODE", "off");
-      offPrinted = true;
+    if (currentMode == MODE_IDLE && !idlePrinted) {
+      logEvent("MODE", "idle");
+      idlePrinted = true;
     }
 
     if (currentMode == MODE_TRAINING && !trainingStarted) {
