@@ -943,15 +943,17 @@ void bluetoothLoop() {
 
     updateBatteryReading(now);
 
-    const bool shouldSendTherapyLive =
-        connected &&
-        !isCalibrating() &&
-        therapyIsRunning() &&
+    const bool shouldSendLive = connected && !isCalibrating() &&
         (forceLiveSync || (now - lastLiveSendMs) >= 150UL);
 
-    if (shouldSendTherapyLive) {
+    if (shouldSendLive) {
         updatePostureAngle();
     }
+
+    const char *appPosture =
+        (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
+            ? "BAD POSTURE"
+            : "GOOD POSTURE";
 
     if (connected) {
         static unsigned long lastTelemetrySend = 0;
@@ -999,44 +1001,18 @@ void bluetoothLoop() {
             lastTelemetrySend = now;
         }
 
-        if (shouldSendTherapyLive) {
-            const char *appPosture =
-                (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
-                    ? "BAD POSTURE"
-                    : "GOOD POSTURE";
-
-            char therapyLiveBuffer[256];
-            snprintf(
-                therapyLiveBuffer,
-                sizeof(therapyLiveBuffer),
-                "{\"t\":\"TL\","
-                "\"profile_id\":%lu,"
-                "\"angle\":%.2f,"
-                "\"posture\":\"%s\","
-                "\"elapsed\":%lu,"
-                "\"remaining\":%lu,"
-                "\"pattern\":\"%s\","
-                "\"next\":\"%s\","
-                "\"current\":%u,"
-                "\"total\":%u}",
+        if (shouldSendLive) {
+            char liveBuffer[64];
+            snprintf(liveBuffer, sizeof(liveBuffer),
+                "{\"t\":\"L\",\"profile_id\":%lu,\"angle\":%.2f,\"posture\":\"%s\"}",
                 (unsigned long)profileId,
                 currentAngle,
-                appPosture,
-                therapyGetElapsedSeconds(),
-                therapyGetRemainingSeconds(),
-                therapyGetCurrentPatternName(),
-                therapyGetNextPatternName(),
-                (unsigned)therapyGetCurrentPatternIndex(),
-                (unsigned)therapyGetTotalPatternCount()
+                appPosture
             );
-
-            sendBlePacket(therapyLiveBuffer);
-
+            sendBlePacket(liveBuffer);
 #if ALIGN_RTT_JSON_LOG
-            rtt.print("[BLE TX] ");
-            rtt.println(therapyLiveBuffer);
+            rtt.println(liveBuffer);
 #endif
-
             forceLiveSync = false;
             lastLiveSendMs = now;
         }
