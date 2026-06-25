@@ -107,7 +107,7 @@ static void sendDeviceInfoPacket() {
 }
 
 static void sendTherapyPlanPacket() {
-    if (!pCharacteristic || !connected) return;
+    if (!pCharacteristic || !connected || !therapyIsRunning()) return;
 
     uint8_t seq[30];
     int total = getTherapyPatternSequence(seq, 30);
@@ -132,7 +132,9 @@ static void sendTherapyPlanPacket() {
 }
 
 static void sendTherapyLivePacket() {
-    if (!pCharacteristic || !connected) return;
+    if (!pCharacteristic || !connected || !therapyIsRunning() || isCalibrating()) {
+        return;
+    }
 
     updatePostureAngle();
     const char *appPosture =
@@ -1010,15 +1012,10 @@ void bluetoothLoop() {
 
     updateBatteryReading(now);
 
-    const bool shouldSendLive = connected && !isCalibrating() && therapyIsRunning() &&
-        (forceLiveSync || (now - lastLiveSendMs) >= 150UL);
-
-    if (shouldSendLive) {
-        updatePostureAngle();
-    }
+    const bool runningNow = therapyIsRunning();
 
     if (connected) {
-        if (therapyIsRunning()) {
+        if (runningNow) {
             const uint32_t sid = therapyGetSessionId();
             if (!therapyPlanSentForSession || lastTherapyPlanSessionId != sid) {
                 sendTherapyPlanPacket();
@@ -1027,6 +1024,7 @@ void bluetoothLoop() {
             }
         } else {
             therapyPlanSentForSession = false;
+            lastTherapyPlanSessionId = 0;
         }
 
         static unsigned long lastTelemetrySend = 0;
@@ -1044,22 +1042,27 @@ void bluetoothLoop() {
             strcmp(lastProfile, profileName) != 0 ||
             lastProfileId != profileId ||
             lastBatteryPercentage != batteryPercentage ||
-            lastRunning != therapyIsRunning();
+            lastRunning != runningNow;
 
         if (!isCalibrating() &&
             (telemetryChanged || (now - lastTelemetrySend) >= 5000UL)) {
             char telemetryBuffer[192];
-            snprintf(telemetryBuffer, sizeof(telemetryBuffer),
-                "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\",\"running\":%s,"
-                "\"sid\":%lu,\"duration\":%lu,\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
-                modeString,
-                subModeStr,
-                therapyIsRunning() ? "true" : "false",
-                (unsigned long)therapyGetSessionId(),
-                (unsigned long)therapyGetTotalDurationSeconds(),
-                (unsigned long)profileId,
-                profileName,
-                (unsigned)batteryPercentage
+            snprintf(
+              telemetryBuffer,
+              sizeof(telemetryBuffer),
+              "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
+              "\"running\":%s,"
+              "\"sid\":%lu,"
+              "\"duration\":%lu,"
+              "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
+              modeString,
+              subModeStr,
+              runningNow ? "true" : "false",
+              (unsigned long)therapyGetSessionId(),
+              therapyGetTotalDurationSeconds(),
+              (unsigned long)profileId,
+              profileName,
+              (unsigned)batteryPercentage
             );
             sendBlePacket(telemetryBuffer);
 #if ALIGN_RTT_JSON_LOG
@@ -1074,13 +1077,19 @@ void bluetoothLoop() {
             lastProfile[sizeof(lastProfile) - 1] = '\0';
             lastProfileId = profileId;
             lastBatteryPercentage = batteryPercentage;
-            lastRunning = therapyIsRunning();
+            lastRunning = runningNow;
             telemetryCacheValid = true;
             forceTelemetrySync = false;
             lastTelemetrySend = now;
         }
 
-        if (shouldSendLive) {
+        const bool shouldSendTherapyLive =
+            connected &&
+            !isCalibrating() &&
+            runningNow &&
+            (forceLiveSync || (now - lastLiveSendMs) >= 150UL);
+
+        if (shouldSendTherapyLive) {
             sendTherapyLivePacket();
             forceLiveSync = false;
             lastLiveSendMs = now;

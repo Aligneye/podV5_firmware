@@ -376,6 +376,7 @@ unsigned long therapyGetRemainingSeconds() {
 }
 
 unsigned long therapyGetTotalDurationSeconds() {
+    if (!therapyIsRunning()) return 0;
     return therapyDurationMs / 1000UL;
 }
 
