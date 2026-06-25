@@ -35,12 +35,8 @@ void therapyStop(bool returnToTraining = true);
 bool therapyIsRunning();
 unsigned long therapyGetElapsedMs();
 unsigned long therapyGetRemainingMs();
-unsigned long therapyGetElapsedSeconds();
-unsigned long therapyGetRemainingSeconds();
 const char* therapyGetCurrentPatternName();
 const char* therapyGetNextPatternName();
-uint8_t therapyGetCurrentPatternIndex();
-uint8_t therapyGetTotalPatternCount();
 
 uint16_t getTherapyUniquePatternCount();
 uint16_t getTherapyTotalPatternCount();
