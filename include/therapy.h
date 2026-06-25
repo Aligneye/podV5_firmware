@@ -42,3 +42,14 @@ uint16_t getTherapyUniquePatternCount();
 uint16_t getTherapyTotalPatternCount();
 int getTherapyPatternSequence(uint8_t* out, uint8_t maxLen);
 const char* getPatternNameByIndex(int idx);
+
+unsigned long therapyGetElapsedSeconds();
+unsigned long therapyGetRemainingSeconds();
+unsigned long therapyGetTotalDurationSeconds();
+unsigned long therapyGetPatternElapsedSeconds();
+unsigned long therapyGetPatternRemainingSeconds();
+uint8_t therapyGetCurrentPatternIndex();
+uint8_t therapyGetCurrentPatternId();
+uint8_t therapyGetTotalPatternCount();
+uint32_t therapyGetSessionId();
+

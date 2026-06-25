@@ -38,6 +38,8 @@ static bool forceTelemetrySync = false;
 static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
 static unsigned long connectedSinceMs = 0;
+static bool therapyPlanSentForSession = false;
+static uint32_t lastTherapyPlanSessionId = 0;
 static volatile bool pendingDfuEnter = false;
 static volatile bool pendingProfileListSend = false;
 static volatile bool pendingFactoryReset = false;
@@ -103,6 +105,56 @@ static void sendDeviceInfoPacket() {
              HW_VERSION);
     sendBlePacket(payload);
 }
+
+static void sendTherapyPlanPacket() {
+    if (!pCharacteristic || !connected) return;
+
+    uint8_t seq[30];
+    int total = getTherapyPatternSequence(seq, 30);
+
+    char seqStr[128];
+    int pos = 0;
+    pos += snprintf(seqStr + pos, sizeof(seqStr) - pos, "[");
+    for (int i = 0; i < total; i++) {
+        pos += snprintf(seqStr + pos, sizeof(seqStr) - pos, "%d%s", (int)seq[i], (i == total - 1) ? "" : ",");
+    }
+    pos += snprintf(seqStr + pos, sizeof(seqStr) - pos, "]");
+
+    char payload[256];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"TP\",\"sid\":%lu,\"duration\":%lu,\"pattern_dur\":%lu,\"total\":%d,\"seq\":%s}",
+             (unsigned long)therapyGetSessionId(),
+             (unsigned long)therapyGetTotalDurationSeconds(),
+             (unsigned long)(THERAPY_PATTERN_MS / 1000UL),
+             total,
+             seqStr);
+    sendBlePacket(payload);
+}
+
+static void sendTherapyLivePacket() {
+    if (!pCharacteristic || !connected) return;
+
+    updatePostureAngle();
+    const char *appPosture =
+        (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
+            ? "BAD POSTURE"
+            : "GOOD POSTURE";
+
+    char payload[256];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"TL\",\"sid\":%lu,\"idx\":%d,\"pid\":%d,\"elapsed\":%lu,\"remaining\":%lu,\"p_elapsed\":%lu,\"p_remaining\":%lu,\"angle\":%.2f,\"posture\":\"%s\"}",
+             (unsigned long)therapyGetSessionId(),
+             (int)therapyGetCurrentPatternIndex(),
+             (int)therapyGetCurrentPatternId(),
+             (unsigned long)therapyGetElapsedSeconds(),
+             (unsigned long)therapyGetRemainingSeconds(),
+             (unsigned long)therapyGetPatternElapsedSeconds(),
+             (unsigned long)therapyGetPatternRemainingSeconds(),
+             currentAngle,
+             appPosture);
+    sendBlePacket(payload);
+}
+
 
 static const char* bleDisconnectReasonText(uint8_t reason) {
     switch (reason) {
@@ -258,6 +310,8 @@ static void onBleConnect(uint16_t conn_handle) {
     forceLiveSync = true;
     lastLiveSendMs = 0;
     connectedSinceMs = millis();
+    therapyPlanSentForSession = false;
+    lastTherapyPlanSessionId = 0;
     turnRgbLedOff();
     rtt.println("[BLE EVT] connected");
 }
@@ -698,6 +752,13 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             } else if (cmd == "GET_DEVICE_INFO") {
                 sendDeviceInfoPacket();
                 ok = true;
+            } else if (cmd == "GET_THERAPY_PLAN") {
+                if (therapyIsRunning()) {
+                    sendTherapyPlanPacket();
+                } else {
+                    forceTelemetrySync = true;
+                }
+                ok = true;
             } else if (cmd == "FACTORY_RESET") {
                 pendingFactoryReset = true;
                 ok = true;
@@ -789,6 +850,12 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 start = end + 1;
             }
             if (autoSlot) addCalibrationProfile(profileName.c_str());
+        } else if (cmdName == "GET_THERAPY_PLAN") {
+            if (therapyIsRunning()) {
+                sendTherapyPlanPacket();
+            } else {
+                forceTelemetrySync = true;
+            }
         } else {
             String cmdValue = cmdName;
             if (payload.indexOf("PROFILE_SELECT;") >= 0 || payload.startsWith("PROFILE_SELECT")) {
@@ -943,19 +1010,25 @@ void bluetoothLoop() {
 
     updateBatteryReading(now);
 
-    const bool shouldSendLive = connected && !isCalibrating() &&
+    const bool shouldSendLive = connected && !isCalibrating() && therapyIsRunning() &&
         (forceLiveSync || (now - lastLiveSendMs) >= 150UL);
 
     if (shouldSendLive) {
         updatePostureAngle();
     }
 
-    const char *appPosture =
-        (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
-            ? "BAD POSTURE"
-            : "GOOD POSTURE";
-
     if (connected) {
+        if (therapyIsRunning()) {
+            const uint32_t sid = therapyGetSessionId();
+            if (!therapyPlanSentForSession || lastTherapyPlanSessionId != sid) {
+                sendTherapyPlanPacket();
+                therapyPlanSentForSession = true;
+                lastTherapyPlanSessionId = sid;
+            }
+        } else {
+            therapyPlanSentForSession = false;
+        }
+
         static unsigned long lastTelemetrySend = 0;
         static bool telemetryCacheValid = false;
         static char lastMode[12] = "";
@@ -963,22 +1036,27 @@ void bluetoothLoop() {
         static char lastProfile[32] = "";
         static uint32_t lastProfileId = 0u;
         static uint8_t lastBatteryPercentage = 255;
+        static bool lastRunning = false;
 
         bool telemetryChanged = forceTelemetrySync || !telemetryCacheValid ||
             strcmp(lastMode, modeString) != 0 ||
             strcmp(lastSubMode, subModeStr) != 0 ||
             strcmp(lastProfile, profileName) != 0 ||
             lastProfileId != profileId ||
-            lastBatteryPercentage != batteryPercentage;
+            lastBatteryPercentage != batteryPercentage ||
+            lastRunning != therapyIsRunning();
 
         if (!isCalibrating() &&
             (telemetryChanged || (now - lastTelemetrySend) >= 5000UL)) {
-            char telemetryBuffer[128];
+            char telemetryBuffer[192];
             snprintf(telemetryBuffer, sizeof(telemetryBuffer),
-                "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
-                "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
+                "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\",\"running\":%s,"
+                "\"sid\":%lu,\"duration\":%lu,\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
                 modeString,
                 subModeStr,
+                therapyIsRunning() ? "true" : "false",
+                (unsigned long)therapyGetSessionId(),
+                (unsigned long)therapyGetTotalDurationSeconds(),
                 (unsigned long)profileId,
                 profileName,
                 (unsigned)batteryPercentage
@@ -996,23 +1074,14 @@ void bluetoothLoop() {
             lastProfile[sizeof(lastProfile) - 1] = '\0';
             lastProfileId = profileId;
             lastBatteryPercentage = batteryPercentage;
+            lastRunning = therapyIsRunning();
             telemetryCacheValid = true;
             forceTelemetrySync = false;
             lastTelemetrySend = now;
         }
 
         if (shouldSendLive) {
-            char liveBuffer[64];
-            snprintf(liveBuffer, sizeof(liveBuffer),
-                "{\"t\":\"L\",\"profile_id\":%lu,\"angle\":%.2f,\"posture\":\"%s\"}",
-                (unsigned long)profileId,
-                currentAngle,
-                appPosture
-            );
-            sendBlePacket(liveBuffer);
-#if ALIGN_RTT_JSON_LOG
-            rtt.println(liveBuffer);
-#endif
+            sendTherapyLivePacket();
             forceLiveSync = false;
             lastLiveSendMs = now;
         }
