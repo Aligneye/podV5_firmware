@@ -201,7 +201,7 @@ void trainingGetFilteredAccel(float *outY, float *outZ) {
 }
 
 // Session stats (training mode)
-static Mode s_lastModeForSession = MODE_OFF;
+static Mode s_lastModeForSession = MODE_IDLE;
 
 #if ALIGN_RTT_SENSOR_LOG
 static unsigned long s_lastSensorRttMs = 0;

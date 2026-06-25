@@ -45,11 +45,6 @@ static unsigned long calibResultSetAt    = 0;
 
 static unsigned long s_failVibEndMs      = 0;
 static unsigned long s_successPulseEndMs = 0;
-static unsigned long s_postValidationStartMs = 0;
-static uint32_t      s_postValidationProfileId = 0u;
-static bool          s_postValidationActive = false;
-static bool          s_postValidationFailed = false;
-
 // Temporary buffer for successful calibration before profile naming
 static float s_lastCalibratedX = 0.0f;
 static float s_lastCalibratedY = 0.0f;
@@ -90,58 +85,6 @@ static void calibrationStartBlocked(const char* reason) {
     notifyCalibrationComplete(false, 0u, "", 0u, 0u, 0u, reason ? reason : "START_BLOCKED");
 }
 
-static void startPostCalibrationValidation(uint32_t profileId) {
-    s_postValidationStartMs = millis();
-    s_postValidationProfileId = profileId;
-    s_postValidationActive = true;
-    s_postValidationFailed = false;
-}
-
-static void cancelPostCalibrationValidation() {
-    s_postValidationStartMs = 0;
-    s_postValidationProfileId = 0u;
-    s_postValidationActive = false;
-    s_postValidationFailed = false;
-}
-
-static void handlePostCalibrationValidation(unsigned long nowMs) {
-    if (!s_postValidationActive || s_postValidationFailed) {
-        return;
-    }
-
-    const unsigned long elapsed = nowMs - s_postValidationStartMs;
-    if ((elapsed % 1000UL) < 50UL) {
-        char payload[96];
-        snprintf(payload, sizeof(payload), "{\"event\":\"post_validate\",\"angle\":%.2f,\"elapsed_ms\":%lu}", currentAngle, elapsed);
-        logPacket("CALIB", payload);
-    }
-    if (elapsed < 5000UL) {
-        return;
-    }
-
-    if (elapsed <= 10000UL) {
-        if (fabsf(currentAngle) > 5.0f) {
-            s_postValidationFailed = true;
-            char payload[96];
-            snprintf(payload, sizeof(payload), "{\"event\":\"unstable\",\"angle\":%.2f,\"limit\":5}", currentAngle);
-            logPacket("CALIB", payload);
-            deleteCalibrationProfileById(s_postValidationProfileId);
-            notifyCalibrationComplete(false, s_postValidationProfileId, "", 0u, 0u, (uint16_t)totalSamples, "CALIBRATION_UNSTABLE");
-            cancelPostCalibrationValidation();
-        } else if (elapsed >= 9000UL) {
-            char payload[96];
-            snprintf(payload, sizeof(payload), "{\"event\":\"stable\",\"angle\":%.2f}", currentAngle);
-            logPacket("CALIB", payload);
-        }
-        return;
-    }
-
-    char payload[96];
-    snprintf(payload, sizeof(payload), "{\"event\":\"validated\",\"angle_limit\":5}");
-    logPacket("CALIB", payload);
-    cancelPostCalibrationValidation();
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────────────
 static void goToTrainingMode() {
     deviceOn = true;
@@ -174,7 +117,7 @@ static void calibrationFail(const char* reason) {
     goToTrainingMode();
 }
 
-static void calibrationSuccess(float avgX, float avgY, float avgZ) {
+static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples) {
     calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
@@ -209,7 +152,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
         char payload[96];
         snprintf(payload, sizeof(payload), "{\"quality\":\"%s\",\"value\":%u}", qualityLabel, (unsigned)quality);
         logPacket("CALIB", payload);
-        startPostCalibrationValidation(profileId ? profileId : profileIdBeforeSave);
         notifyCalibrationStatus("success", "done");
         notifyCalibrationComplete(true,
                                   profileId ? profileId : profileIdBeforeSave,
@@ -217,7 +159,9 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ) {
                                   slotBeforeSave,
                                   quality,
                                   (uint16_t)totalSamples,
-                                  nullptr);
+                                  nullptr,
+                                  avgX, avgY, avgZ,
+                                  passedSamples);
     }
 
     // Start this after profile storage so flash writes cannot stretch the pulse.
@@ -279,7 +223,6 @@ void initCalibration() {
     motorSetDuty(0);
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
-    cancelPostCalibrationValidation();
     s_lastSampleTime    = 0;
     s_lastCalibrationValid = false;
     totalSamples = 0;
@@ -300,8 +243,6 @@ void handleCalibration() {
         startCalibration();
         return;
     }
-
-    handlePostCalibrationValidation(currentMillis);
 
     if (calibState == CALIB_STATE_IDLE) {
         return;
@@ -438,7 +379,7 @@ void handleCalibration() {
             const float avgX = finalSumX / (float)validCount;
             const float avgY = finalSumY / (float)validCount;
             const float avgZ = finalSumZ / (float)validCount;
-            calibrationSuccess(avgX, avgY, avgZ);
+            calibrationSuccess(avgX, avgY, avgZ, (uint16_t)validCount);
             return;
         }
     }
@@ -458,16 +399,8 @@ void startCalibration() {
         return;
     }
 
-    if (!bluetoothIsConnected()) {
-        calibrationStartBlocked("DEVICE_NOT_CONNECTED");
-        return;
-    }
     if (!sensorInitialized) {
         calibrationStartBlocked("SENSOR_NOT_INITIALIZED");
-        return;
-    }
-    if (bluetoothGetBatteryPercentage() < 10u) {
-        calibrationStartBlocked("LOW_BATTERY");
         return;
     }
     if (therapyIsRunning() || bluetoothIsMotorActive()) {

@@ -45,14 +45,14 @@ void loop() {
     buttonLoop();
     motorUpdate();
     bluetoothLoop();
-    if (currentMode == MODE_OFF || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
+    calibrationLoop();
+    if (currentMode == MODE_IDLE || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
         return;
     }
     therapyLoop();
     // Training first: posture motor is authoritative unless calibration idle-handler
     // applies short success/fail buzz afterward (see calibration.cpp).
     trainingLoop();
-    calibrationLoop();
     maintainDeviceTime();
     updateSessionStats();
     maintainSessionStats();

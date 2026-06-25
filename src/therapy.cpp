@@ -19,6 +19,8 @@ static unsigned long therapyDurationMs = THERAPY_DURATION_10_MIN;
 static unsigned long patternStartMs = 0;
 static unsigned long lastTickMs = 0;
 static bool patternsInitialized = false;
+static uint32_t therapySessionId = 0;
+
 
 #define MAX_THERAPY_PATTERNS 30
 static int patternSequence[MAX_THERAPY_PATTERNS];
@@ -266,6 +268,10 @@ void therapySetup() {
 }
 
 void therapyStart() {
+    therapySessionId++;
+    if (therapySessionId == 0) {
+        therapySessionId = 1;
+    }
     therapyDurationMs = durationForSubMode(therapySubModeIndex);
     therapyDuration = therapyDurationMs;
     therapyStartMs = millis();
@@ -336,7 +342,7 @@ void therapyLoop() {
 }
 
 bool therapyIsRunning() {
-    return therapyState == THERAPY_RUNNING;
+    return currentMode == MODE_THERAPY && therapyState == THERAPY_RUNNING;
 }
 
 unsigned long therapyGetElapsedMs() {
@@ -360,3 +366,55 @@ const char* therapyGetNextPatternName() {
     if (!patternsInitialized || currentPatternIndex + 1 >= totalPatterns) return "Complete";
     return PATTERN_NAMES[patternSequence[currentPatternIndex + 1]];
 }
+
+unsigned long therapyGetElapsedSeconds() {
+    return therapyGetElapsedMs() / 1000UL;
+}
+
+unsigned long therapyGetRemainingSeconds() {
+    return therapyGetRemainingMs() / 1000UL;
+}
+
+unsigned long therapyGetTotalDurationSeconds() {
+    if (!therapyIsRunning()) return 0;
+    return therapyDurationMs / 1000UL;
+}
+
+unsigned long therapyGetPatternElapsedSeconds() {
+    if (!therapyIsRunning()) return 0;
+    return (millis() - patternStartMs) / 1000UL;
+}
+
+unsigned long therapyGetPatternRemainingSeconds() {
+    if (!therapyIsRunning()) return 0;
+    unsigned long elapsed = millis() - patternStartMs;
+    if (elapsed >= THERAPY_PATTERN_MS) return 0;
+    return (THERAPY_PATTERN_MS - elapsed) / 1000UL;
+}
+
+uint8_t therapyGetCurrentPatternIndex() {
+    if (!therapyIsRunning() || currentPatternIndex < 0 || currentPatternIndex >= totalPatterns) {
+        return 0;
+    }
+    return (uint8_t)(currentPatternIndex + 1); // 1-based for app
+}
+
+uint8_t therapyGetCurrentPatternId() {
+    if (!therapyIsRunning() ||
+        !patternsInitialized ||
+        currentPatternIndex < 0 ||
+        currentPatternIndex >= totalPatterns) {
+        return 255;
+    }
+    return (uint8_t)patternSequence[currentPatternIndex];
+}
+
+uint8_t therapyGetTotalPatternCount() {
+    return (uint8_t)totalPatterns;
+}
+
+uint32_t therapyGetSessionId() {
+    if (!therapyIsRunning()) return 0;
+    return therapySessionId;
+}
+
