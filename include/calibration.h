@@ -55,6 +55,7 @@ float getLastCalibratedX();
 float getLastCalibratedY();
 float getLastCalibratedZ();
 bool isLastCalibrationValid();
+void setPendingCalibrationName(const char* name);
 
 void initCalibration();
 void handleCalibration();
