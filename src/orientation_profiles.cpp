@@ -59,19 +59,45 @@ void initProfiles() {
     if (!storageLoadProfiles(s_profiles, &s_profileCount)) {
         s_profileCount = 0;
     }
+
+    uint32_t maxId = 0;
+    for (uint8_t i = 0; i < s_profileCount; i++) {
+        if (s_profiles[i].id > maxId) {
+            maxId = s_profiles[i].id;
+        }
+    }
+
+    uint32_t nextId = storageLoadNextProfileId();
+    if (nextId <= maxId) {
+        nextId = maxId + 1;
+    }
+
+    bool updated = false;
     for (uint8_t i = 0; i < s_profileCount; i++) {
         if (s_profiles[i].id == 0u) {
-            s_profiles[i].id = (uint32_t)(i + 1u);
+            s_profiles[i].id = nextId++;
+            updated = true;
+        }
+        for (uint8_t j = 0; j < i; j++) {
+            if (s_profiles[i].id == s_profiles[j].id) {
+                s_profiles[i].id = nextId++;
+                updated = true;
+                break;
+            }
         }
         s_profiles[i].valid = 1;
     }
+
+    if (updated) {
+        storageSaveNextProfileId(nextId);
+        storageSaveProfiles(s_profiles, s_profileCount);
+    }
+
     if (storageLoadActiveProfileIndex() >= 0 && storageLoadActiveProfileIndex() < (int8_t)s_profileCount) {
         s_activeProfileId = s_profiles[storageLoadActiveProfileIndex()].id;
     }
-    if (s_defaultProfileId == 0u && s_profileCount > 0) {
-        s_defaultProfileId = s_profiles[0].id;
-        storageSaveDefaultProfileId(s_defaultProfileId);
-    }
+    // Do not force defaultProfileId to s_profiles[0].id if it is 0,
+    // as 0 represents "System default" which is a valid default choice.
     const OrientationProfile* active = getActiveProfile();
     if (active) {
         setPostureOrigin3D(active->refX, active->refY, active->refZ);
@@ -111,6 +137,7 @@ bool addNextCalibrationProfile() {
 }
 
 bool deleteCalibrationProfileById(uint32_t id) {
+    if (s_defaultProfileId == id) return false; // Cannot delete the default profile
     int index = findProfileIndexByIdInternal(id);
     if (index < 0) return false;
     for (uint8_t i = (uint8_t)index; i + 1 < s_profileCount; i++) {
@@ -153,6 +180,10 @@ bool selectCalibrationProfile(uint8_t index) {
 }
 
 bool selectCalibrationProfileById(uint32_t id) {
+    if (id == 0u) {
+        selectDefaultCalibrationProfile();
+        return true;
+    }
     int index = findProfileIndexByIdInternal(id);
     if (index < 0) return false;
     s_activeProfileId = id;
@@ -163,7 +194,7 @@ bool selectCalibrationProfileById(uint32_t id) {
 }
 
 void setProfileDefaultById(uint32_t id) {
-    if (findProfileIndexByIdInternal(id) >= 0) {
+    if (id == 0u || findProfileIndexByIdInternal(id) >= 0) {
         s_defaultProfileId = id;
         storageSaveDefaultProfileId(id);
     }

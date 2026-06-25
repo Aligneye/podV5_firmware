@@ -487,21 +487,36 @@ static void sendProfileList() {
     char profilesJson[800];
     profilesJson[0] = '\0';
     strncat(profilesJson, "[", sizeof(profilesJson) - 1);
+    bool activeProfileSent = false;
+    bool defaultProfileSent = false;
     for (uint8_t i = 0; i < getProfileCount(); i++) {
         const OrientationProfile* p = getProfile(i);
         if (!p || !p->valid) continue;
         int quality = (int)(p->stabilityScore);
         if (quality < 0) quality = 0;
         if (quality > 100) quality = 100;
-        char item[192];
+        
+        int isActiveVal = 0;
+        if (!activeProfileSent && getActiveProfile() && getActiveProfile()->id == p->id) {
+            isActiveVal = 1;
+            activeProfileSent = true;
+        }
+        
+        int isDefaultVal = 0;
+        if (!defaultProfileSent && getDefaultProfileId() == p->id) {
+            isDefaultVal = 1;
+            defaultProfileSent = true;
+        }
+        
+        char item[128];
         snprintf(item, sizeof(item),
-                 "%s{\"id\":%lu,\"slot\":%u,\"name\":\"%s\",\"valid\":true,\"active\":%s,\"default\":%s,\"created\":%lu,\"quality\":%d}",
+                 "%s{\"id\":%lu,\"s\":%u,\"n\":\"%s\",\"a\":%d,\"d\":%d,\"c\":%lu,\"q\":%d}",
                  (profilesJson[1] == '\0') ? "" : ",",
                  (unsigned long)p->id,
                  (unsigned)(i + 1),
                  p->name,
-                 (getActiveProfile() && getActiveProfile()->id == p->id) ? "true" : "false",
-                 (getDefaultProfileId() == p->id) ? "true" : "false",
+                 isActiveVal,
+                 isDefaultVal,
                  (unsigned long)p->createdAtEpoch,
                  quality);
         strncat(profilesJson, item, sizeof(profilesJson) - strlen(profilesJson) - 1);
@@ -706,8 +721,13 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 extractJsonStringField(payload, "slot", slotValue);
                 extractJsonStringField(payload, "name", profileName);
                 if (slotValue == "auto") {
-                    ok = addCalibrationProfile(profileName.c_str());
-                    if (!ok) error = "PROFILE_CREATE_FAILED";
+                    if (getProfileCount() >= 8) {
+                        error = "PROFILE_CREATE_FAILED";
+                    } else {
+                        setPendingCalibrationName(profileName.c_str());
+                        requestCalibrationStart();
+                        ok = true;
+                    }
                 } else {
                     error = "INVALID_SLOT";
                 }
@@ -851,7 +871,12 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 }
                 start = end + 1;
             }
-            if (autoSlot) addCalibrationProfile(profileName.c_str());
+            if (autoSlot) {
+                if (getProfileCount() < 8) {
+                    setPendingCalibrationName(profileName.c_str());
+                    requestCalibrationStart();
+                }
+            }
         } else if (cmdName == "GET_THERAPY_PLAN") {
             if (therapyIsRunning()) {
                 sendTherapyPlanPacket();
