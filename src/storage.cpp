@@ -471,9 +471,6 @@ uint32_t storageLoadDefaultProfileId() {
 void storageSaveDefaultProfileId(uint32_t id) {
     if (g_settings.defaultProfileId == id) return;
     g_settings.defaultProfileId = id;
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return;
-#endif
     persist();
 }
 
@@ -485,9 +482,6 @@ void storageSaveNextProfileId(uint32_t id) {
     if (id == 0u) id = 1u;
     if (g_settings.nextProfileId == id) return;
     g_settings.nextProfileId = id;
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return;
-#endif
     persist();
 }
 

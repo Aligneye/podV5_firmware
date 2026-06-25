@@ -487,12 +487,27 @@ static void sendProfileList() {
     char profilesJson[800];
     profilesJson[0] = '\0';
     strncat(profilesJson, "[", sizeof(profilesJson) - 1);
+    bool activeProfileSent = false;
+    bool defaultProfileSent = false;
     for (uint8_t i = 0; i < getProfileCount(); i++) {
         const OrientationProfile* p = getProfile(i);
         if (!p || !p->valid) continue;
         int quality = (int)(p->stabilityScore);
         if (quality < 0) quality = 0;
         if (quality > 100) quality = 100;
+        
+        int isActiveVal = 0;
+        if (!activeProfileSent && getActiveProfile() && getActiveProfile()->id == p->id) {
+            isActiveVal = 1;
+            activeProfileSent = true;
+        }
+        
+        int isDefaultVal = 0;
+        if (!defaultProfileSent && getDefaultProfileId() == p->id) {
+            isDefaultVal = 1;
+            defaultProfileSent = true;
+        }
+        
         char item[128];
         snprintf(item, sizeof(item),
                  "%s{\"id\":%lu,\"s\":%u,\"n\":\"%s\",\"a\":%d,\"d\":%d,\"c\":%lu,\"q\":%d}",
@@ -500,8 +515,8 @@ static void sendProfileList() {
                  (unsigned long)p->id,
                  (unsigned)(i + 1),
                  p->name,
-                 (getActiveProfile() && getActiveProfile()->id == p->id) ? 1 : 0,
-                 (getDefaultProfileId() == p->id) ? 1 : 0,
+                 isActiveVal,
+                 isDefaultVal,
                  (unsigned long)p->createdAtEpoch,
                  quality);
         strncat(profilesJson, item, sizeof(profilesJson) - strlen(profilesJson) - 1);
