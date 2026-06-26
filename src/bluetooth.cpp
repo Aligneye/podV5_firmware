@@ -10,6 +10,7 @@
 #include "BatteryMonitor.h"
 #include "version.h"
 #include "monitor_log.h"
+#include <cstring>
 #include <bluefruit.h>
 #include <ble_hci.h>
 #if __has_include(<InternalFileSystem.h>)
@@ -37,6 +38,7 @@ static bool disconnectionHapticPending = false;
 static bool forceTelemetrySync = false;
 static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
+static unsigned long lastTherapyLiveSendMs = 0;
 static unsigned long connectedSinceMs = 0;
 static bool therapyPlanSentForSession = false;
 static uint32_t lastTherapyPlanSessionId = 0;
@@ -58,6 +60,8 @@ static bool batteryReadValid = false;
 static bool batteryBlinkActive = false;
 static unsigned long batteryBlinkStartMs = 0;
 
+static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 150UL;
+static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
@@ -68,6 +72,9 @@ static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void rttPrintBlePacket(const char* direction, const char* payload) {
     if (!direction || !payload) return;
+    if (strcmp(direction, "TX") == 0 && strstr(payload, "\"t\":\"L\"") != nullptr) {
+        return;
+    }
     rtt.print("[BLE ");
     rtt.print(direction);
     rtt.print("] ");
@@ -156,6 +163,38 @@ static void sendTherapyLivePacket() {
              appPosture);
     sendBlePacket(payload);
 }
+
+static const char* currentModeText() {
+    if (currentMode == MODE_TRAINING) {
+        return "TRAINING";
+    }
+    if (currentMode == MODE_THERAPY) {
+        return "THERAPY";
+    }
+    return "OFF";
+}
+
+static void sendLivePacket() {
+    if (!pCharacteristic || !connected) return;
+    if (isCalibrating()) return;
+
+    updatePostureAngle();
+
+    const char* postureStr = (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
+        ? "BAD POSTURE"
+        : "GOOD POSTURE";
+
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"L\",\"mode\":\"%s\",\"angle\":%.2f,\"difficulty_angle\":%.0f,\"posture\":\"%s\"}",
+             currentModeText(),
+             currentAngle,
+             kBadPostureDeg,
+             postureStr);
+
+    sendBlePacket(payload);
+}
+
 
 
 static const char* bleDisconnectReasonText(uint8_t reason) {
@@ -311,6 +350,7 @@ static void onBleConnect(uint16_t conn_handle) {
     forceTelemetrySync = true;
     forceLiveSync = true;
     lastLiveSendMs = 0;
+    lastTherapyLiveSendMs = 0;
     connectedSinceMs = millis();
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
@@ -1108,16 +1148,26 @@ void bluetoothLoop() {
             lastTelemetrySend = now;
         }
 
-        const bool shouldSendTherapyLive =
+        const bool canSendLive =
             connected &&
-            !isCalibrating() &&
-            runningNow &&
-            (forceLiveSync || (now - lastLiveSendMs) >= 150UL);
+            !isCalibrating();
 
-        if (shouldSendTherapyLive) {
-            sendTherapyLivePacket();
-            forceLiveSync = false;
-            lastLiveSendMs = now;
+        if (canSendLive) {
+            // 1. TL: Therapy Live packet every 1000 ms only during therapy
+            if (therapyIsRunning() &&
+                (lastTherapyLiveSendMs == 0 ||
+                 ((now - lastTherapyLiveSendMs) >= THERAPY_LIVE_PACKET_INTERVAL_MS))) {
+                lastTherapyLiveSendMs = now;
+                sendTherapyLivePacket();
+            }
+
+            // 2. L: Fast live posture packet every 150 ms
+            if (forceLiveSync ||
+                ((now - lastLiveSendMs) >= LIVE_PACKET_INTERVAL_MS)) {
+                forceLiveSync = false;
+                lastLiveSendMs = now;
+                sendLivePacket();
+            }
         }
     }
 
