@@ -38,7 +38,16 @@ static bool disconnectionHapticPending = false;
 static bool forceTelemetrySync = false;
 static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
+static unsigned long lastTrainingTelemetrySendMs = 0;
 static unsigned long lastTherapyLiveSendMs = 0;
+
+static bool telemetryCacheValid = false;
+static char lastMode[12] = "";
+static char lastSubMode[16] = "";
+static char lastProfile[32] = "";
+static uint32_t lastProfileId = 0u;
+static uint8_t lastBatteryPercentage = 255;
+static bool lastRunning = false;
 static unsigned long connectedSinceMs = 0;
 static bool therapyPlanSentForSession = false;
 static uint32_t lastTherapyPlanSessionId = 0;
@@ -61,6 +70,7 @@ static bool batteryBlinkActive = false;
 static unsigned long batteryBlinkStartMs = 0;
 
 static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 150UL;
+static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
@@ -70,11 +80,10 @@ static constexpr uint8_t DISCONNECTION_HAPTIC_DUTY = 150;
 static constexpr uint16_t DISCONNECTION_HAPTIC_MS = 250;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
+static void updateBatteryReading(unsigned long now);
+
 static void rttPrintBlePacket(const char* direction, const char* payload) {
     if (!direction || !payload) return;
-    if (strcmp(direction, "TX") == 0 && strstr(payload, "\"t\":\"L\"") != nullptr) {
-        return;
-    }
     rtt.print("[BLE ");
     rtt.print(direction);
     rtt.print("] ");
@@ -171,7 +180,7 @@ static const char* currentModeText() {
     if (currentMode == MODE_THERAPY) {
         return "THERAPY";
     }
-    return "OFF";
+    return "IDLE";
 }
 
 static void sendLivePacket() {
@@ -193,6 +202,73 @@ static void sendLivePacket() {
              postureStr);
 
     sendBlePacket(payload);
+}
+
+static void sendStatusTelemetry(const char* source = nullptr, const char* reason = nullptr) {
+    (void)source;
+    (void)reason;
+    if (!pCharacteristic || !connected) return;
+    if (isCalibrating()) return;
+
+    const unsigned long now = millis();
+
+    // Determine submode string
+    char subModeStr[16];
+    if (currentMode == MODE_TRAINING) {
+        if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
+            strcpy(subModeStr, "INSTANT");
+        } else if (trainingSubModeIndex == TrainingAlertStyle::Instant) {
+            strcpy(subModeStr, "INSTANT");
+        } else {
+            strcpy(subModeStr, "DELAYED");
+        }
+    } else if (currentMode == MODE_THERAPY) {
+        snprintf(subModeStr, sizeof(subModeStr), "%lu MIN", therapyDuration / 60000);
+    } else {
+        strcpy(subModeStr, "INSTANT");
+    }
+
+    const OrientationProfile *activeProfile = getActiveProfile();
+    const uint32_t profileId = activeProfile ? activeProfile->id : 0u;
+    const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
+
+    const char *modeString = currentModeText();
+
+    updateBatteryReading(now);
+
+    const bool runningNow = therapyIsRunning();
+
+    char telemetryBuffer[192];
+    snprintf(
+      telemetryBuffer,
+      sizeof(telemetryBuffer),
+      "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
+      "\"running\":%s,"
+      "\"sid\":%lu,"
+      "\"duration\":%lu,"
+      "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
+      modeString,
+      subModeStr,
+      runningNow ? "true" : "false",
+      (unsigned long)therapyGetSessionId(),
+      therapyGetTotalDurationSeconds(),
+      (unsigned long)profileId,
+      profileName,
+      (unsigned)batteryPercentage
+    );
+    sendBlePacket(telemetryBuffer);
+
+    // Update state caches
+    strncpy(lastMode, modeString, sizeof(lastMode) - 1);
+    lastMode[sizeof(lastMode) - 1] = '\0';
+    strncpy(lastSubMode, subModeStr, sizeof(lastSubMode) - 1);
+    lastSubMode[sizeof(lastSubMode) - 1] = '\0';
+    strncpy(lastProfile, profileName, sizeof(lastProfile) - 1);
+    lastProfile[sizeof(lastProfile) - 1] = '\0';
+    lastProfileId = profileId;
+    lastBatteryPercentage = batteryPercentage;
+    lastRunning = runningNow;
+    telemetryCacheValid = true;
 }
 
 
@@ -350,6 +426,7 @@ static void onBleConnect(uint16_t conn_handle) {
     forceTelemetrySync = true;
     forceLiveSync = true;
     lastLiveSendMs = 0;
+    lastTrainingTelemetrySendMs = 0;
     lastTherapyLiveSendMs = 0;
     connectedSinceMs = millis();
     therapyPlanSentForSession = false;
@@ -1046,11 +1123,11 @@ void bluetoothLoop() {
         updateBatteryStatusBlink(now);
     }
 
-    // Determine submode string
+    // Check if telemetry state changed to set forceTelemetrySync
     char subModeStr[16];
     if (currentMode == MODE_TRAINING) {
         if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
-            strcpy(subModeStr, "INSTANT"); // Fallback/default app expectation
+            strcpy(subModeStr, "INSTANT");
         } else if (trainingSubModeIndex == TrainingAlertStyle::Instant) {
             strcpy(subModeStr, "INSTANT");
         } else {
@@ -1066,18 +1143,23 @@ void bluetoothLoop() {
     const uint32_t profileId = activeProfile ? activeProfile->id : 0u;
     const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
 
-    const char *modeString = "TRACKING";
-    if (currentMode == MODE_TRAINING) {
-        modeString = (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) ? "TRACKING" : "TRAINING";
-    } else if (currentMode == MODE_THERAPY) {
-        modeString = "THERAPY";
-    } else if (currentMode == MODE_IDLE) {
-        modeString = "IDLE";
-    }
+    const char *modeString = currentModeText();
 
     updateBatteryReading(now);
 
     const bool runningNow = therapyIsRunning();
+
+    bool telemetryChanged = !telemetryCacheValid ||
+        strcmp(lastMode, modeString) != 0 ||
+        strcmp(lastSubMode, subModeStr) != 0 ||
+        strcmp(lastProfile, profileName) != 0 ||
+        lastProfileId != profileId ||
+        lastBatteryPercentage != batteryPercentage ||
+        lastRunning != runningNow;
+
+    if (telemetryChanged) {
+        forceTelemetrySync = true;
+    }
 
     if (connected) {
         if (runningNow) {
@@ -1092,81 +1174,38 @@ void bluetoothLoop() {
             lastTherapyPlanSessionId = 0;
         }
 
-        static unsigned long lastTelemetrySend = 0;
-        static bool telemetryCacheValid = false;
-        static char lastMode[12] = "";
-        static char lastSubMode[16] = "";
-        static char lastProfile[32] = "";
-        static uint32_t lastProfileId = 0u;
-        static uint8_t lastBatteryPercentage = 255;
-        static bool lastRunning = false;
-
-        bool telemetryChanged = forceTelemetrySync || !telemetryCacheValid ||
-            strcmp(lastMode, modeString) != 0 ||
-            strcmp(lastSubMode, subModeStr) != 0 ||
-            strcmp(lastProfile, profileName) != 0 ||
-            lastProfileId != profileId ||
-            lastBatteryPercentage != batteryPercentage ||
-            lastRunning != runningNow;
-
-        if (!isCalibrating() &&
-            (telemetryChanged || (now - lastTelemetrySend) >= 5000UL)) {
-            char telemetryBuffer[192];
-            snprintf(
-              telemetryBuffer,
-              sizeof(telemetryBuffer),
-              "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
-              "\"running\":%s,"
-              "\"sid\":%lu,"
-              "\"duration\":%lu,"
-              "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
-              modeString,
-              subModeStr,
-              runningNow ? "true" : "false",
-              (unsigned long)therapyGetSessionId(),
-              therapyGetTotalDurationSeconds(),
-              (unsigned long)profileId,
-              profileName,
-              (unsigned)batteryPercentage
-            );
-            sendBlePacket(telemetryBuffer);
-#if ALIGN_RTT_JSON_LOG
-            rtt.println(telemetryBuffer);
-#endif
-
-            strncpy(lastMode, modeString, sizeof(lastMode) - 1);
-            lastMode[sizeof(lastMode) - 1] = '\0';
-            strncpy(lastSubMode, subModeStr, sizeof(lastSubMode) - 1);
-            lastSubMode[sizeof(lastSubMode) - 1] = '\0';
-            strncpy(lastProfile, profileName, sizeof(lastProfile) - 1);
-            lastProfile[sizeof(lastProfile) - 1] = '\0';
-            lastProfileId = profileId;
-            lastBatteryPercentage = batteryPercentage;
-            lastRunning = runningNow;
-            telemetryCacheValid = true;
-            forceTelemetrySync = false;
-            lastTelemetrySend = now;
-        }
-
-        const bool canSendLive =
+        const bool canSendBle =
             connected &&
-            !isCalibrating();
+            pCharacteristic != nullptr;
 
-        if (canSendLive) {
-            // 1. TL: Therapy Live packet every 1000 ms only during therapy
-            if (therapyIsRunning() &&
-                (lastTherapyLiveSendMs == 0 ||
-                 ((now - lastTherapyLiveSendMs) >= THERAPY_LIVE_PACKET_INTERVAL_MS))) {
-                lastTherapyLiveSendMs = now;
-                sendTherapyLivePacket();
-            }
-
-            // 2. L: Fast live posture packet every 150 ms
+        if (canSendBle) {
+            // 1. L: Always send live posture packet every 150 ms
             if (forceLiveSync ||
+                lastLiveSendMs == 0 ||
                 ((now - lastLiveSendMs) >= LIVE_PACKET_INTERVAL_MS)) {
                 forceLiveSync = false;
                 lastLiveSendMs = now;
                 sendLivePacket();
+            }
+
+            // 2. T: Send training/status telemetry every 1000 ms in TRAINING mode, or on force sync
+            if ((currentMode == MODE_TRAINING &&
+                 (forceTelemetrySync ||
+                  lastTrainingTelemetrySendMs == 0 ||
+                  ((now - lastTrainingTelemetrySendMs) >= TRAINING_TELEMETRY_INTERVAL_MS))) ||
+                (forceTelemetrySync && currentMode != MODE_TRAINING)) {
+                forceTelemetrySync = false;
+                lastTrainingTelemetrySendMs = now;
+                sendStatusTelemetry("loop", "training_1s");
+            }
+
+            // 3. TL: Send therapy live progress every 1000 ms in THERAPY mode
+            if (currentMode == MODE_THERAPY &&
+                therapyIsRunning() &&
+                (lastTherapyLiveSendMs == 0 ||
+                 ((now - lastTherapyLiveSendMs) >= THERAPY_LIVE_PACKET_INTERVAL_MS))) {
+                lastTherapyLiveSendMs = now;
+                sendTherapyLivePacket();
             }
         }
     }

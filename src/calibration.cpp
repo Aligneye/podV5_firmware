@@ -150,12 +150,16 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         return;
     }
 
+    logEvent("CALIB", "success_enter");
+
     bool saveSuccess = false;
+    logEvent("CALIB", "before_profile_save");
     if (s_pendingProfileName[0] != '\0') {
         saveSuccess = addCalibrationProfile(s_pendingProfileName);
     } else {
         saveSuccess = addNextCalibrationProfile();
     }
+    logEvent("CALIB", saveSuccess ? "after_profile_save_ok" : "after_profile_save_fail");
 
     if (!saveSuccess) {
         calibState = CALIB_STATE_IDLE;
@@ -196,6 +200,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     logEvent("CALIB", "done");
 
     // Keep this as "complete" for app compatibility.
+    logEvent("CALIB", "before_notify_done");
     notifyCalibrationStatus("complete", "done");
 
     notifyCalibrationComplete(true,
@@ -207,6 +212,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
                               nullptr,
                               avgX, avgY, avgZ,
                               passedSamples);
+    logEvent("CALIB", "after_notify_done");
 
     motorSetDuty(0);
     s_successPulseEndMs = millis() + 125UL;
@@ -377,12 +383,16 @@ void handleCalibration() {
         }
 
         if (elapsed >= CALIB_TOTAL_MS) {
+            logEvent("CALIB", "end_reached");
+
             if (totalSamples == 0) {
                 calibrationFail("TOO_FEW_SAMPLES");
                 return;
             }
 
+            logEvent("CALIB", "calculating_stats");
             CalibrationStats finalStats = calculateCalibrationStats(totalSamples);
+            logEvent("CALIB", "stats_done");
 
 #if ALIGN_RTT_CALIB_VERBOSE
             rtt.printf("CALIB STATS: Mean[%s, %s, %s], StdDev[%s, %s, %s]\n",
@@ -431,7 +441,10 @@ void handleCalibration() {
             const float avgX = finalSumX / (float)validCount;
             const float avgY = finalSumY / (float)validCount;
             const float avgZ = finalSumZ / (float)validCount;
+
+            logEvent("CALIB", "before_success");
             calibrationSuccess(avgX, avgY, avgZ, (uint16_t)validCount);
+            logEvent("CALIB", "after_success");
             return;
         }
     }
@@ -454,22 +467,19 @@ void startCalibration() {
         calibrationStartBlocked("SENSOR_NOT_INITIALIZED");
         return;
     }
-    if (therapyIsRunning() || bluetoothIsMotorActive()) {
-        calibrationStartBlocked("MOTOR_ACTIVE");
-        return;
-    }
+
+    // Force stop therapy and set training mode before starting
+    therapyStop(false);
+    setDeviceMode(MODE_TRAINING);
+    motorSetDuty(0);
 
     lastCalibrationResult[0] = '\0';
     calibResultSetAt = 0;
 
     deviceOn = true;
     wakePostureSensor();
-    if (therapyIsRunning()) {
-        therapyStop(false);
-    }
 
     // Start calibration with start haptic pulse (150 duty for 150ms)
-    motorSetDuty(0);
     motorOverrideDuty(150, 150);
 
     calibState         = CALIB_STATE_GET_READY;
