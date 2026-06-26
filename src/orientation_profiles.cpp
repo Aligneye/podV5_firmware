@@ -121,8 +121,11 @@ bool addCalibrationProfile(const char* name) {
     p.createdAtEpoch = millis() / 1000UL;
     p.sampleCount = 0;
     p.stabilityScore = 0.0f;
-    storageSaveProfiles(s_profiles, s_profileCount);
-    selectCalibrationProfileById(p.id);
+    if (!storageSaveProfiles(s_profiles, s_profileCount)) {
+        s_profileCount--; // Rollback in-memory profile count
+        return false;
+    }
+    storageSaveActiveProfileIndex(p.id);
     if (s_defaultProfileId == 0u) {
         s_defaultProfileId = p.id;
         storageSaveDefaultProfileId(s_defaultProfileId);
@@ -140,11 +143,22 @@ bool deleteCalibrationProfileById(uint32_t id) {
     if (s_defaultProfileId == id) return false; // Cannot delete the default profile
     int index = findProfileIndexByIdInternal(id);
     if (index < 0) return false;
+
+    // Backup current state for rollback
+    OrientationProfile backup[8];
+    memcpy(backup, s_profiles, sizeof(s_profiles));
+    uint8_t backupCount = s_profileCount;
+
     for (uint8_t i = (uint8_t)index; i + 1 < s_profileCount; i++) {
         s_profiles[i] = s_profiles[i + 1];
     }
     s_profileCount--;
-    storageSaveProfiles(s_profiles, s_profileCount);
+    if (!storageSaveProfiles(s_profiles, s_profileCount)) {
+        // Rollback on write failure
+        memcpy(s_profiles, backup, sizeof(s_profiles));
+        s_profileCount = backupCount;
+        return false;
+    }
     if (s_activeProfileId == id) selectDefaultCalibrationProfile();
     if (s_defaultProfileId == id) {
         s_defaultProfileId = (s_profileCount > 0) ? s_profiles[0].id : 0u;
@@ -156,8 +170,14 @@ bool deleteCalibrationProfileById(uint32_t id) {
 bool renameCalibrationProfileById(uint32_t id, const char* name) {
     int index = findProfileIndexByIdInternal(id);
     if (index < 0 || !name || !*name) return false;
+    char oldName[24];
+    strncpy(oldName, s_profiles[index].name, sizeof(oldName));
     copyProfileName(s_profiles[index].name, name);
-    storageSaveProfiles(s_profiles, s_profileCount);
+    if (!storageSaveProfiles(s_profiles, s_profileCount)) {
+        // Rollback rename on write failure
+        strncpy(s_profiles[index].name, oldName, sizeof(s_profiles[index].name));
+        return false;
+    }
     return true;
 }
 

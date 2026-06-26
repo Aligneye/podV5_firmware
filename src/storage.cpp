@@ -79,6 +79,9 @@ static constexpr uint8_t NEXT_OVERWRITE_DEFAULT = 0u;
 static constexpr uint32_t PROFILE_STORE_MAGIC = 0x50524631UL; // "PRF1"
 static const char* PROFILE_STORE_PATH = "/profiles.dat";
 static const char* PROFILE_STORE_TMP_PATH = "/profiles.tmp";
+static const char* SETTINGS_FILE_PATH = "/sys_settings.dat";
+static const char* SETTINGS_TMP_PATH  = "/sys_settings.tmp";
+static bool s_storageInitialized = false;
 
 struct ProfileStore {
     uint32_t magic;
@@ -207,7 +210,48 @@ static void nvmcWriteWords(uint32_t addr, const uint32_t* src, uint32_t count) {
 }
 
 // ── Persist / load ─────────────────────────────────────────────────────────
-static void persist() {
+static bool persist() {
+#if PROFILE_STORE_HAS_FS
+    InternalFS.begin();
+    InternalFS.remove(SETTINGS_TMP_PATH);
+    File tmp = InternalFS.open(SETTINGS_TMP_PATH, FILE_O_WRITE);
+    if (tmp) {
+        g_settings.crc = computeSettingsCrc(g_settings);
+        size_t written = tmp.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
+        tmp.flush();
+        tmp.close();
+        if (written == sizeof(g_settings)) {
+            InternalFS.remove(SETTINGS_FILE_PATH);
+            if (InternalFS.rename(SETTINGS_TMP_PATH, SETTINGS_FILE_PATH)) {
+                rtt.println("[STORAGE] Settings persisted to FS successfully");
+                return true;
+            }
+            
+            // Fallback direct write if rename fails
+            File direct = InternalFS.open(SETTINGS_FILE_PATH, FILE_O_WRITE);
+            if (direct) {
+                size_t written2 = direct.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
+                direct.flush();
+                direct.close();
+                InternalFS.remove(SETTINGS_TMP_PATH);
+                if (written2 == sizeof(g_settings)) {
+                    rtt.println("[STORAGE] Settings persisted to FS successfully via direct write");
+                    return true;
+                }
+            }
+        }
+        InternalFS.remove(SETTINGS_TMP_PATH);
+    }
+    rtt.println("[STORAGE] WARNING: FS persist failed");
+#endif
+
+    // Only allow NVMC fallback at boot time before storage setup completes.
+    // At runtime (BLE active, calibration running), direct NVMC flash writes are blocked to avoid CPU reset.
+    if (s_storageInitialized) {
+        rtt.println("[STORAGE] ERROR: FS persist failed; NVMC fallback blocked during active runtime");
+        return false;
+    }
+
     // Pad struct to whole 32-bit words for NVMC word writes.
     constexpr uint32_t kWordCount =
         (sizeof(PersistedSettings) + 3u) / 4u;
@@ -219,9 +263,30 @@ static void persist() {
     nvmcErasePage(SETTINGS_PAGE_ADDR);
     nvmcWriteWords(SETTINGS_PAGE_ADDR, buffer, kWordCount);
     interrupts();
+    rtt.println("[STORAGE] Settings persisted to NVMC (boot-time)");
+    return true;
 }
 
 static bool loadFromFlash() {
+#if PROFILE_STORE_HAS_FS
+    InternalFS.begin();
+    File file = InternalFS.open(SETTINGS_FILE_PATH, FILE_O_READ);
+    if (file) {
+        PersistedSettings tempSettings;
+        int readBytes = file.read(reinterpret_cast<uint8_t*>(&tempSettings), sizeof(tempSettings));
+        file.close();
+        if (readBytes == (int)sizeof(tempSettings) && tempSettings.magic == SETTINGS_MAGIC) {
+            uint32_t expectedCrc = computeSettingsCrc(tempSettings);
+            if (tempSettings.crc == 0u || tempSettings.crc == expectedCrc) {
+                g_settings = tempSettings;
+                rtt.println("[STORAGE] Settings loaded from FS successfully");
+                return true;
+            }
+        }
+        rtt.println("[STORAGE] Invalid settings file on FS, falling back to NVMC");
+    }
+#endif
+
     const uint8_t* base = reinterpret_cast<const uint8_t*>(SETTINGS_PAGE_ADDR);
     const uint32_t* magic = reinterpret_cast<const uint32_t*>(base);
     if (*magic != SETTINGS_MAGIC) return false;
@@ -282,6 +347,7 @@ static bool loadFromFlash() {
 
         g_settings.crc = 0u;
         persist();  // migrate flash layout to v4
+        rtt.println("[STORAGE] Settings migrated from legacy NVMC (v1-v3)");
         return true;
     }
     if (*ver != SETTINGS_VERSION) return false;
@@ -303,6 +369,10 @@ static bool loadFromFlash() {
     if (g_settings.crc != 0u && g_settings.crc != expectedCrc) {
         return false;
     }
+
+    // We loaded it from NVMC successfully, now save it to FS for future accesses.
+    rtt.println("[STORAGE] Settings loaded from NVMC, saving to FS");
+    persist();
     return true;
 }
 
@@ -316,17 +386,18 @@ void storageSetup() {
         logEvent("STORAGE", "empty_defaults");
         persist();
     }
+    s_storageInitialized = true;
     session_log_init();
 }
 
-void saveTrainingDelay(TrainingDelay delay) {
+bool saveTrainingDelay(TrainingDelay delay) {
     uint8_t d = (uint8_t)delay;
     if (d < (uint8_t)TRAIN_DELAYED || d > (uint8_t)TRAIN_INSTANT) {
         d = (uint8_t)TRAIN_INSTANT;
     }
-    if (g_settings.trainingDelay == d) return;
+    if (g_settings.trainingDelay == d) return true;
     g_settings.trainingDelay = d;
-    persist();
+    return persist();
 }
 
 TrainingDelay loadTrainingDelay() {
@@ -341,11 +412,12 @@ uint8_t storageLoadTherapySubMode() {
     return (uint8_t)loadTrainingDelay();
 }
 
-void storageSaveTherapySubMode(uint8_t idx) {
-    saveTrainingDelay((TrainingDelay)idx);
+bool storageSaveTherapySubMode(uint8_t idx) {
+    bool ok = saveTrainingDelay((TrainingDelay)idx);
     char buf[80];
     snprintf(buf, sizeof(buf), "{\"t\":\"STORAGE\",\"event\":\"save_training_delay\",\"value\":%u}", (unsigned)loadTrainingDelay());
     logPacket("EVT", buf);
+    return ok;
 }
 
 bool storageLoadCalibration(float* y, float* z) {
@@ -354,16 +426,17 @@ bool storageLoadCalibration(float* y, float* z) {
     return true;
 }
 
-void storageSaveCalibration(float y, float z) {
+bool storageSaveCalibration(float y, float z) {
     if (fabsf(y) < 0.1f && fabsf(z) < 0.1f) {
         y = 6.75f;
         z = 6.75f;
     }
-    if (g_settings.calY == y && g_settings.calZ == z) return;
+    if (g_settings.calY == y && g_settings.calZ == z) return true;
     g_settings.calY = y;
     g_settings.calZ = z;
-    persist();
+    bool ok = persist();
     logEvent("STORAGE", "saved_posture_calibration");
+    return ok;
 }
 
 void storageFactoryReset() {
@@ -411,8 +484,8 @@ bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
     return true;
 }
 
-void storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
-    if (!profiles) return;
+bool storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
+    if (!profiles) return false;
     uint8_t countToSave = count;
     if (countToSave > 8) countToSave = 8;
     g_settings.profileCount = countToSave;
@@ -425,63 +498,63 @@ void storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
     }
 
 #if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return;
+    if (writeProfileStore()) return true;
 #endif
 
-    persist();
+    return persist();
 }
 
 int8_t storageLoadActiveProfileIndex() {
     return decodeStoredActiveProfileIndex();
 }
 
-void storageSaveActiveProfileIndex(int8_t index) {
+bool storageSaveActiveProfileIndex(int8_t index) {
     uint8_t stored = ACTIVE_PROFILE_DEFAULT;
     if (index >= 0 && index < (int8_t)g_settings.profileCount && index < (int8_t)ACTIVE_PROFILE_MAX_STORED) {
         stored = (uint8_t)(index + 1);
     }
-    if (g_settings.reserved2[0] == stored) return;
+    if (g_settings.reserved2[0] == stored) return true;
 
     g_settings.reserved2[0] = stored;
 #if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return;
+    if (writeProfileStore()) return true;
 #endif
-    persist();
+    return persist();
 }
 
 uint8_t storageLoadNextProfileOverwriteIndex() {
     return decodeStoredNextOverwriteIndex();
 }
 
-void storageSaveNextProfileOverwriteIndex(uint8_t index) {
+bool storageSaveNextProfileOverwriteIndex(uint8_t index) {
     if (index >= ACTIVE_PROFILE_MAX_STORED) index = NEXT_OVERWRITE_DEFAULT;
-    if (g_settings.reserved2[1] == index) return;
+    if (g_settings.reserved2[1] == index) return true;
 
     g_settings.reserved2[1] = index;
 #if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return;
+    if (writeProfileStore()) return true;
 #endif
-    persist();
+    return persist();
 }
 
 uint32_t storageLoadDefaultProfileId() {
     return decodeStoredDefaultProfileId();
 }
 
-void storageSaveDefaultProfileId(uint32_t id) {
-    if (g_settings.defaultProfileId == id) return;
+bool storageSaveDefaultProfileId(uint32_t id) {
+    if (g_settings.defaultProfileId == id) return true;
     g_settings.defaultProfileId = id;
-    persist();
+    return persist();
 }
 
 uint32_t storageLoadNextProfileId() {
     return decodeStoredNextProfileId();
 }
 
-void storageSaveNextProfileId(uint32_t id) {
+bool storageSaveNextProfileId(uint32_t id) {
     if (id == 0u) id = 1u;
-    if (g_settings.nextProfileId == id) return;
+    if (g_settings.nextProfileId == id) return true;
     g_settings.nextProfileId = id;
-    persist();
+    return persist();
 }
 
