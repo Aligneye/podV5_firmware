@@ -17,8 +17,8 @@ static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 50;
 // ── Public API ─────────────────────────────────────────────────────────────
 static void applyDuty(uint8_t duty) {
     if (currentMode == MODE_THERAPY) {
-        float scale = 0.85f; // Mid
-        if (therapyIntensityLevel == 1) scale = 0.70f;
+        float scale = 0.75f; // Mid (Level 2)
+        if (therapyIntensityLevel == 1) scale = 0.50f;
         else if (therapyIntensityLevel == 3) scale = 1.00f;
         duty = (uint8_t)((float)duty * scale);
     }

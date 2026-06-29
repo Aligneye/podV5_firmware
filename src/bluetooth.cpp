@@ -152,25 +152,54 @@ static void sendTherapyLivePacket() {
         return;
     }
 
-    updatePostureAngle();
-    const char *appPosture =
-        (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
-            ? "BAD POSTURE"
-            : "GOOD POSTURE";
-
     char payload[256];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"TL\",\"sid\":%lu,\"idx\":%d,\"pid\":%d,\"elapsed\":%lu,\"remaining\":%lu,\"p_elapsed\":%lu,\"p_remaining\":%lu,\"angle\":%.2f,\"posture\":\"%s\"}",
+             "{\"t\":\"TL\",\"sid\":%lu,\"idx\":%d,\"pid\":%d,\"elapsed\":%lu,\"remaining\":%lu,\"p_elapsed\":%lu,\"p_remaining\":%lu}",
              (unsigned long)therapyGetSessionId(),
              (int)therapyGetCurrentPatternIndex(),
              (int)therapyGetCurrentPatternId(),
              (unsigned long)therapyGetElapsedSeconds(),
              (unsigned long)therapyGetRemainingSeconds(),
              (unsigned long)therapyGetPatternElapsedSeconds(),
-             (unsigned long)therapyGetPatternRemainingSeconds(),
-             currentAngle,
-             appPosture);
+             (unsigned long)therapyGetPatternRemainingSeconds());
     sendBlePacket(payload);
+}
+
+void notifyTherapyComplete(uint32_t elapsedSeconds) {
+    if (!pCharacteristic || !connected) {
+        return;
+    }
+
+    uint8_t seq[30];
+    int total = getTherapyPatternSequence(seq, 30);
+
+    char seqStr[128];
+    int pos = 0;
+    pos += snprintf(seqStr + pos, sizeof(seqStr) - pos, "[");
+    for (int i = 0; i < total && pos > 0 && pos < ((int)sizeof(seqStr) - 2); i++) {
+        pos += snprintf(seqStr + pos, sizeof(seqStr) - pos,
+                        "%d%s", (int)seq[i], (i == total - 1) ? "" : ",");
+    }
+    if (pos < 0 || pos >= (int)sizeof(seqStr)) {
+        pos = (int)sizeof(seqStr) - 2;
+    }
+    snprintf(seqStr + pos, sizeof(seqStr) - pos, "]");
+
+    char payload[320];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"TC\",\"sid\":%lu,\"completed\":true,\"elapsed\":%lu,"
+             "\"duration\":%lu,\"pattern_dur\":%lu,\"total\":%d,"
+             "\"unique\":%u,\"seq\":%s}",
+             (unsigned long)therapyGetSessionId(),
+             (unsigned long)elapsedSeconds,
+             (unsigned long)therapyGetTotalDurationSeconds(),
+             (unsigned long)(THERAPY_PATTERN_MS / 1000UL),
+             total,
+             (unsigned)getTherapyUniquePatternCount(),
+             seqStr);
+    sendBlePacket(payload);
+    forceTelemetrySync = true;
+    forceLiveSync = true;
 }
 
 static const char* currentModeText() {
@@ -551,6 +580,18 @@ static void applyMode(const String &valueRaw) {
     }
 }
 
+static void stopTherapyFromBle() {
+    if (currentMode == MODE_THERAPY) {
+        setDeviceMode(MODE_TRAINING);
+    } else {
+        therapyStop(false);
+    }
+    deviceOn = true;
+    forceTelemetrySync = true;
+    forceLiveSync = true;
+    logEvent("BLE", "therapy_stop");
+}
+
 static void applyCalibrationControl(const String &valueRaw) {
     String value = valueRaw;
     value.trim();
@@ -581,6 +622,9 @@ static void applyAction(const String &valueRaw) {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
         logEvent("BLE", "action_calibrate_cancel");
+    } else if (value == "STOP_THERAPY" || value == "THERAPY_STOP" ||
+               value == "STOP THERAPY" || value == "STOP") {
+        stopTherapyFromBle();
     } else if (value == "ENTER_DFU" || value == "OTA_DFU" || value == "DFU") {
         if (pendingDfuEnter) return;
         pendingDfuEnter = true;
@@ -898,6 +942,10 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                     forceTelemetrySync = true;
                 }
                 ok = true;
+            } else if (cmd == "STOP_THERAPY" || cmd == "THERAPY_STOP" ||
+                       cmd == "STOP THERAPY" || cmd == "STOP") {
+                stopTherapyFromBle();
+                ok = true;
             } else if (cmd == "FACTORY_RESET") {
                 pendingFactoryReset = true;
                 ok = true;
@@ -963,6 +1011,8 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
     }
 
     if (cmdName.length() > 0) {
+        cmdName.trim();
+        cmdName.toUpperCase();
         if (cmdName == "GET_PROFILES") {
             pendingProfileListSend = true;
         } else if (cmdName == "CALIBRATE_CANCEL") {
@@ -1000,6 +1050,9 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             } else {
                 forceTelemetrySync = true;
             }
+        } else if (cmdName == "STOP_THERAPY" || cmdName == "THERAPY_STOP" ||
+                   cmdName == "STOP THERAPY" || cmdName == "STOP") {
+            stopTherapyFromBle();
         } else {
             String cmdValue = cmdName;
             if (payload.indexOf("PROFILE_SELECT;") >= 0 || payload.startsWith("PROFILE_SELECT")) {

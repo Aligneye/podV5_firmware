@@ -1,5 +1,6 @@
 #include "therapy.h"
 #include "button.h"
+#include "bluetooth.h"
 #include "calibration.h"
 #include "motor.h"
 #include "session_stats.h"
@@ -305,12 +306,19 @@ void therapyLoop() {
     if (isCalibrating()) {
         return;
     }
+    if (currentMode != MODE_THERAPY) {
+        if (therapyState == THERAPY_RUNNING) {
+            therapyStop(false);
+        }
+        return;
+    }
     if (therapyState != THERAPY_RUNNING) return;
 
     unsigned long now = millis();
     unsigned long totalElapsed = now - therapyStartMs;
 
     if (totalElapsed >= therapyDurationMs) {
+        notifyTherapyComplete(totalElapsed / 1000UL);
         therapyStop();
         return;
     }
@@ -327,6 +335,7 @@ void therapyLoop() {
         patternElapsed = 0;
 
         if (currentPatternIndex >= totalPatterns) {
+            notifyTherapyComplete((now - therapyStartMs) / 1000UL);
             therapyStop();
             return;
         }
