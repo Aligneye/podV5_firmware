@@ -11,7 +11,7 @@ on:
       device_model:
         description: 'Device model this release applies to'
         required: true
-        default: 'AlignEye-Pod-V1'
+        default: 'ALIGN_POD_V5'
 
 jobs:
   activate:
