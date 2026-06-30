@@ -1,0 +1,158 @@
+name: Firmware Release
+
+# Trigger: push a tag like v1.2.0 to kick off a release.
+# Adjust the build steps below to match how your firmware is actually compiled.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # ── 1. Build firmware ────────────────────────────────────────────────
+      - name: Set up Python (for PlatformIO + nrfutil)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run -e nrf52832_custom
+
+      - name: Locate build output
+        run: |
+          mkdir -p build
+          cp .pio/build/nrf52832_custom/firmware.bin build/firmware.bin
+          ls -la build/
+
+      # ── 2. Package into the DFU zip ──────────────────────────────────────
+      # This device runs Nordic's Legacy DFU bootloader on Softdevice S132 v6.1.1
+      # (confirmed via CLAUDE.md: "Triple-click enters OTA DFU bootloader mode").
+      # nrfutil's *legacy* nrfutil (not the new Rust nrfutil) is required for this
+      # bootloader generation. Pin a known-good version.
+      - name: Install nrfutil (legacy, for nRF5 SDK DFU)
+        run: |
+          pip install nrfutil==6.1.5
+
+      - name: Write DFU signing key from secret
+        env:
+          DFU_PRIVATE_KEY: ${{ secrets.DFU_PRIVATE_KEY }}
+        run: |
+          echo "$DFU_PRIVATE_KEY" > dfu_private.pem
+
+      - name: Package DFU zip
+        run: |
+          # sd_req for S132 v6.1.1 — verify this matches your bootloader's
+          # expected Softdevice ID (check via bootloader settings page or
+          # Nordic's SoftDevice compatibility table if unsure).
+          SD_REQ=0x91  # placeholder — confirm exact value for S132 6.1.1
+          APP_VERSION=$(echo "${GITHUB_REF_NAME#v}" | tr -d '.')
+          nrfutil pkg generate \
+            --hw-version 52 \
+            --sd-req $SD_REQ \
+            --application build/firmware.bin \
+            --application-version $APP_VERSION \
+            --key-file dfu_private.pem \
+            build/firmware.zip
+          ls -la build/
+
+      # ── 3. Compute version metadata ──────────────────────────────────────
+      - name: Extract version info
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"          # v1.2.0 -> 1.2.0
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER}"      # auto-incrementing
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA256 + file size
+        id: hash
+        run: |
+          SHA256=$(sha256sum build/firmware.zip | awk '{print $1}')
+          SIZE=$(stat -c%s build/firmware.zip)
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+
+      # ── 4. Upload zip to Supabase Storage ────────────────────────────────
+      - name: Upload to Supabase Storage
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          FILE_NAME="firmware_v${{ steps.meta.outputs.version }}.zip"
+          curl -X POST \
+            "$SUPABASE_URL/storage/v1/object/firmware/$FILE_NAME" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@build/firmware.zip"
+          echo "uploaded_file=$FILE_NAME" >> "$GITHUB_ENV"
+
+      # ── 5. Verify upload integrity ───────────────────────────────────────
+      - name: Verify uploaded file hash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          curl -s -L \
+            "$SUPABASE_URL/storage/v1/object/public/firmware/${{ env.uploaded_file }}" \
+            -o downloaded_check.zip
+          REMOTE_SHA=$(sha256sum downloaded_check.zip | awk '{print $1}')
+          LOCAL_SHA="${{ steps.hash.outputs.sha256 }}"
+          if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
+            echo "Hash mismatch! Upload corrupted."
+            exit 1
+          fi
+          echo "Upload verified OK."
+
+      # ── 6. Insert manifest row into Supabase table (inactive by default) ──
+      - name: Insert firmware_releases row
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DEVICE_MODEL: "AlignEye-Pod-V1"          # change to match your device
+          HARDWARE_REVISION: "rev_b"               # change as needed
+          MIN_APP_VERSION: "1.0.0"
+          MIN_BATTERY_PERCENT: "40"
+          MANDATORY: "false"
+        run: |
+          FILE_NAME="${{ env.uploaded_file }}"
+          PUBLIC_URL="$SUPABASE_URL/storage/v1/object/public/firmware/$FILE_NAME"
+
+          curl -X POST \
+            "$SUPABASE_URL/rest/v1/firmware_releases" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{
+              "device_model": "'"$DEVICE_MODEL"'",
+              "hardware_revision": "'"$HARDWARE_REVISION"'",
+              "latest_version": "'"${{ steps.meta.outputs.version }}"'",
+              "build_number": '"${{ steps.meta.outputs.build_number }}"',
+              "min_supported_app_version": "'"$MIN_APP_VERSION"'",
+              "min_battery_percent": '"$MIN_BATTERY_PERCENT"',
+              "mandatory": '"$MANDATORY"',
+              "firmware_url": "'"$PUBLIC_URL"'",
+              "sha256": "'"${{ steps.hash.outputs.sha256 }}"'",
+              "file_size_bytes": '"${{ steps.hash.outputs.size }}"',
+              "release_notes": ["Automated release from GitHub Actions"],
+              "active": false
+            }'
+
+          echo "Inserted as INACTIVE. Flip active=true manually (or via the approval workflow) once verified."
+
+      - name: Summary
+        run: |
+          echo "### Firmware Release Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Version: ${{ steps.meta.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Build number: ${{ steps.meta.outputs.build_number }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SHA256: ${{ steps.hash.outputs.sha256 }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- File size: ${{ steps.hash.outputs.size }} bytes" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Status: inserted as **inactive** — activate manually after QA." >> "$GITHUB_STEP_SUMMARY"
