@@ -642,7 +642,7 @@ static void applyAction(const String &valueRaw) {
     } else if (value == "ENTER_DFU" || value == "OTA_DFU" || value == "DFU") {
         if (pendingDfuEnter) return;
         pendingDfuEnter = true;
-        notifyDfuStatus("armed");
+        notifyDfuStatus("ARMED");
         logEvent("BLE", "action_enter_dfu");
     } else if (value == "GET_DEVICE_INFO") {
         sendDeviceInfoPacket();
@@ -960,6 +960,13 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                        cmd == "STOP THERAPY" || cmd == "STOP") {
                 stopTherapyFromBle();
                 ok = true;
+            } else if (cmd == "ENTER_DFU" || cmd == "OTA_DFU" || cmd == "DFU") {
+                if (!pendingDfuEnter) {
+                    pendingDfuEnter = true;
+                    notifyDfuStatus("ARMED");
+                    logEvent("BLE", "cmd_enter_dfu");
+                }
+                ok = true;
             } else if (cmd == "FACTORY_RESET") {
                 pendingFactoryReset = true;
                 ok = true;
@@ -1164,6 +1171,7 @@ void bluetoothLoop() {
     if (pendingDfuEnter) {
         pendingDfuEnter = false;
         rtt.println("DFU: entering OTA bootloader");
+        notifyDfuStatus("ENTERED");
         delay(50);
         enterOTADfu();
         return;
@@ -1355,7 +1363,7 @@ void notifyDfuStatus(const char* status) {
 
     char payload[96];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"D\",\"status\":\"%s\"}",
+             "{\"dfu\":\"%s\"}",
              (status && status[0] != '\0') ? status : "unknown");
     sendBlePacket(payload);
 }
