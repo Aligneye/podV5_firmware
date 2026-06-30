@@ -1,0 +1,81 @@
+name: Publish firmware metadata to Supabase
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Read release metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NOTES: ${{ github.event.release.body }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+          ASSETS_URL: ${{ github.event.release.assets_url }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -e
+
+          VERSION="${RELEASE_TAG#v}"
+          BUILD_NUMBER=$(echo "$VERSION" | awk -F. '{print ($1 * 10000) + ($2 * 100) + $3}')
+
+          echo "Version: $VERSION"
+          echo "Build: $BUILD_NUMBER"
+
+          ASSETS_JSON=$(curl -s \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$ASSETS_URL")
+
+          ASSET_URL=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n 1)
+          ASSET_NAME=$(echo "$ASSETS_JSON" | jq -r '.[] | select(.name | endswith(".zip")) | .name' | head -n 1)
+
+          if [ -z "$ASSET_URL" ]; then
+            echo "No firmware ZIP asset found"
+            exit 1
+          fi
+
+          curl -L "$ASSET_URL" -o "$ASSET_NAME"
+
+          SHA256=$(sha256sum "$ASSET_NAME" | awk '{print $1}')
+          FILE_SIZE=$(stat -c%s "$ASSET_NAME")
+
+          NOTES_JSON=$(jq -n --arg notes "$RELEASE_NOTES" '$notes | split("\n") | map(select(length > 0))')
+
+          jq -n \
+            --arg latest_version "$VERSION" \
+            --argjson build_number "$BUILD_NUMBER" \
+            --arg device_model "ALIGN_POD_V5" \
+            --arg hardware_revision "POD_V5" \
+            --arg firmware_url "$ASSET_URL" \
+            --arg sha256 "$SHA256" \
+            --argjson file_size_bytes "$FILE_SIZE" \
+            --argjson release_notes "$NOTES_JSON" \
+            --arg github_tag "$RELEASE_TAG" \
+            --arg github_release_url "$RELEASE_URL" \
+            '{
+              latest_version: $latest_version,
+              build_number: $build_number,
+              device_model: $device_model,
+              hardware_revision: $hardware_revision,
+              release_notes: $release_notes,
+              firmware_url: $firmware_url,
+              sha256: $sha256,
+              file_size_bytes: $file_size_bytes,
+              mandatory: false,
+              active: true,
+              github_tag: $github_tag,
+              github_release_url: $github_release_url
+            }' > payload.json
+
+          curl -s -X POST "$SUPABASE_URL/rest/v1/firmware_releases" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            --data @payload.json
