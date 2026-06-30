@@ -33,33 +33,25 @@ jobs:
           ls -la build/
 
       # ── 2. Package into the DFU zip ──────────────────────────────────────
-      # This device runs Nordic's Legacy DFU bootloader on Softdevice S132 v6.1.1
-      # (confirmed via CLAUDE.md: "Triple-click enters OTA DFU bootloader mode").
-      # nrfutil's *legacy* nrfutil (not the new Rust nrfutil) is required for this
-      # bootloader generation. Pin a known-good version.
-      - name: Install nrfutil (legacy, for nRF5 SDK DFU)
+      # This board is an Adafruit Feather nRF52832 using the Adafruit
+      # Bluefruit nRF52 Arduino core (confirmed: #include <bluefruit.h> in
+      # bluetooth.cpp). It uses Adafruit's nRF52 Bootloader, NOT a raw
+      # Nordic SDK bootloader — so packaging must use `adafruit-nrfutil`,
+      # not plain `nrfutil`. Adafruit's stock bootloader does not require
+      # a signing key by default; only add one if your bootloader was
+      # custom-built with DFU signature checking enabled (confirm with
+      # firmware team if unsure).
+      - name: Install adafruit-nrfutil
         run: |
-          pip install nrfutil==6.1.5
-
-      - name: Write DFU signing key from secret
-        env:
-          DFU_PRIVATE_KEY: ${{ secrets.DFU_PRIVATE_KEY }}
-        run: |
-          echo "$DFU_PRIVATE_KEY" > dfu_private.pem
+          pip install adafruit-nrfutil
 
       - name: Package DFU zip
         run: |
-          # sd_req for S132 v6.1.1 — verify this matches your bootloader's
-          # expected Softdevice ID (check via bootloader settings page or
-          # Nordic's SoftDevice compatibility table if unsure).
-          SD_REQ=0x91  # placeholder — confirm exact value for S132 6.1.1
           APP_VERSION=$(echo "${GITHUB_REF_NAME#v}" | tr -d '.')
-          nrfutil pkg generate \
-            --hw-version 52 \
-            --sd-req $SD_REQ \
+          adafruit-nrfutil dfu genpkg \
+            --dev-type 0x0052 \
             --application build/firmware.bin \
             --application-version $APP_VERSION \
-            --key-file dfu_private.pem \
             build/firmware.zip
           ls -la build/
 
@@ -116,8 +108,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          DEVICE_MODEL: "AlignEye-Pod-V1"          # change to match your device
-          HARDWARE_REVISION: "rev_b"               # change as needed
+          DEVICE_MODEL: "ALIGN_POD_V5"              # from include/version.h
+          HARDWARE_REVISION: "POD_V5"               # from include/version.h (HW_VERSION)
           MIN_APP_VERSION: "1.0.0"
           MIN_BATTERY_PERCENT: "40"
           MANDATORY: "false"
