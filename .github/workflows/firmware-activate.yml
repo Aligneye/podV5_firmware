@@ -1,0 +1,50 @@
+name: Activate Firmware Release
+
+# Manually triggered after QA verifies the inactive release is good.
+# Go to Actions tab -> Activate Firmware Release -> Run workflow -> enter version.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Firmware version to activate (e.g. 1.2.0)'
+        required: true
+      device_model:
+        description: 'Device model this release applies to'
+        required: true
+        default: 'AlignEye-Pod-V1'
+
+jobs:
+  activate:
+    runs-on: ubuntu-latest
+    # Optional: gate this behind a GitHub Environment with required reviewers
+    # environment: production-approval
+    steps:
+      - name: Deactivate previous active release
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          curl -X PATCH \
+            "$SUPABASE_URL/rest/v1/firmware_releases?device_model=eq.${{ inputs.device_model }}&active=eq.true" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{"active": false}'
+
+      - name: Activate target release
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          curl -X PATCH \
+            "$SUPABASE_URL/rest/v1/firmware_releases?device_model=eq.${{ inputs.device_model }}&latest_version=eq.${{ inputs.version }}" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=minimal" \
+            -d '{"active": true}'
+
+      - name: Summary
+        run: |
+          echo "Activated firmware ${{ inputs.version }} for ${{ inputs.device_model }}" >> "$GITHUB_STEP_SUMMARY"
