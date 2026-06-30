@@ -112,13 +112,27 @@ static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* e
     sendBlePacket(payload);
 }
 
+static void getDeviceSerial(char* out, size_t outSize) {
+    if (!out || outSize == 0) return;
+    snprintf(out, outSize, "%08lX%08lX",
+             (unsigned long)NRF_FICR->DEVICEID[1],
+             (unsigned long)NRF_FICR->DEVICEID[0]);
+}
+
 static void sendDeviceInfoPacket() {
     if (!pCharacteristic || !connected) return;
-    char payload[192];
+    char serial[17];
+    getDeviceSerial(serial, sizeof(serial));
+
+    char payload[224];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"INFO\",\"fw\":\"%s\",\"hw\":\"%s\",\"serial\":\"AEPOD0001\",\"protocol\":2,\"max_profiles\":8}",
+             "{\"t\":\"INFO\",\"device_name\":\"%s\",\"device_model\":\"%s\",\"hw\":\"%s\",\"fw\":\"%s\",\"fw_build_date\":\"%s\",\"serial\":\"%s\"}",
+             DEVICE_NAME,
+             DEVICE_MODEL,
+             HW_VERSION,
              FW_VERSION,
-             HW_VERSION);
+             FW_BUILD_DATE,
+             serial);
     sendBlePacket(payload);
 }
 
@@ -630,7 +644,7 @@ static void applyAction(const String &valueRaw) {
         pendingDfuEnter = true;
         notifyDfuStatus("armed");
         logEvent("BLE", "action_enter_dfu");
-    } else if (value == "DEVICE_INFO" || value == "GET_VERSION" || value == "VERSION" || value == "GET_DEVICE_INFO") {
+    } else if (value == "GET_DEVICE_INFO") {
         sendDeviceInfoPacket();
         logEvent("BLE", "action_device_info");
     } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
