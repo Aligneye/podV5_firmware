@@ -131,8 +131,9 @@ static void handleDoubleClick() {
   case MODE_IDLE:
     DEBUG_PRINTLN("Entering OTA DFU from IDLE mode");
     setDeviceMode((Mode)MODE_DFU);
-    notifyDfuStatus("armed");
+    notifyDfuStatus("ARMED");
     logEvent("DFU", "entering_ota_bootloader");
+    notifyDfuStatus("ENTERED");
     delay(50);
     enterOTADfu();
     break;
