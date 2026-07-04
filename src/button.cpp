@@ -173,6 +173,7 @@ static void handleHold() {
     return;
   }
 
+  setDeviceMode(MODE_IDLE);
   calibrationRequestStart();
 }
 

@@ -93,6 +93,12 @@ static void goToTrainingMode() {
     s_pendingProfileName[0] = '\0';
 }
 
+static void goToIdleMode() {
+    deviceOn = true;
+    setDeviceMode(MODE_IDLE);
+    s_pendingProfileName[0] = '\0';
+}
+
 static void calibrationFail(const char* reason) {
     calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
@@ -117,7 +123,7 @@ static void calibrationFail(const char* reason) {
     notifyCalibrationStatus("failed", "done");
     notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, reason);
 
-    goToTrainingMode();
+    goToIdleMode();
 }
 
 static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples) {
@@ -146,7 +152,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_failVibEndMs = millis() + 500UL;
         motorOverrideDuty(150, 500);
 
-        goToTrainingMode();
+        goToIdleMode();
         return;
     }
 
@@ -177,7 +183,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_failVibEndMs = millis() + 500UL;
         motorOverrideDuty(150, 500);
 
-        goToTrainingMode();
+        goToIdleMode();
         return;
     }
 
@@ -463,15 +469,15 @@ void startCalibration() {
         return;
     }
 
+    // Put the device into a quiet neutral state before sampling.
+    therapyStop(false);
+    setDeviceMode(MODE_IDLE);
+    motorSetDuty(0);
+
     if (!sensorInitialized) {
         calibrationStartBlocked("SENSOR_NOT_INITIALIZED");
         return;
     }
-
-    // Force stop therapy and set training mode before starting
-    therapyStop(false);
-    setDeviceMode(MODE_TRAINING);
-    motorSetDuty(0);
 
     lastCalibrationResult[0] = '\0';
     calibResultSetAt = 0;
@@ -506,7 +512,7 @@ void cancelCalibration() {
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastCalibrationValid = false;
-    goToTrainingMode();
+    goToIdleMode();
 }
 
 const char* getCalibrationResult() {
