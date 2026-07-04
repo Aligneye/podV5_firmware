@@ -5,12 +5,12 @@
 #include "session_stats.h"
 #include "step_count.h"
 #include "storage.h"
+#include "rtt_debugger.h"
 #include <Adafruit_LIS3DH.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include <math.h>
 #include <string.h>
-#include "monitor_log.h"
 
 /**
 Ye code different modules ko connect kar raha hai.

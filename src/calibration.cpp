@@ -5,7 +5,7 @@
 #include "therapy.h"
 #include "training.h"
 #include "storage.h"
-#include "monitor_log.h"
+#include "rtt_debugger.h"
 #include <math.h>
 #include <string.h>
 

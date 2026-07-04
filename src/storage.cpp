@@ -3,10 +3,10 @@
 #include "session_log.h"
 #include "therapy.h"
 #include "nrf.h"
+#include "rtt_debugger.h"
 #include <RTTStream.h>
 #include <string.h>
 #include <math.h>
-#include "monitor_log.h"
 
 extern RTTStream rtt;
 
