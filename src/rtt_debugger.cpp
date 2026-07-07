@@ -1,6 +1,9 @@
 #include "rtt_debugger.h"
 #include "bluetooth.h"
 #include "calibration.h"
+#include "sleep.h"
+#include "motor.h"
+#include "therapy.h"
 #include "training.h"
 #include <RTTStream.h>
 
@@ -17,11 +20,19 @@ void rttDebuggerLoop() {
     const uint8_t profileCount = getProfileCount();
     const uint8_t batteryPct = bluetoothGetBatteryPercentage();
 
-    char payload[256];
+    char payload[512];
     snprintf(payload, sizeof(payload),
              "{\"raw_x\":%.2f,\"raw_y\":%.2f,\"raw_z\":%.2f,\"angle\":%.1f,"
-             "\"active_profile\":\"%s\",\"profile_count\":%u,\"battery_pct\":%u}",
-             rawX, rawY, rawZ, currentAngle, profileName, (unsigned)profileCount, (unsigned)batteryPct);
+             "\"active_profile\":\"%.23s\",\"profile_count\":%u,\"battery_pct\":%u,"
+             "\"therapy_running\":%s,\"calibration_running\":%s,\"training_motor_alert\":%s,\"motor_active\":%s,"
+             "\"motor_output_on\":%s,\"inactivity_timer_s\":%.3f}",
+             rawX, rawY, rawZ, currentAngle, profileName, (unsigned)profileCount, (unsigned)batteryPct,
+             isTherapyRunning ? "true" : "false",
+             isCalibrationRunning ? "true" : "false",
+             isTrainingMotorAlertActive ? "true" : "false",
+             motorActive ? "true" : "false",
+             motorOutputIsOn() ? "true" : "false",
+             (double)inactivityTimerGetElapsedMs() / 1000.0);
     rtt.print("[RTT DBG] ");
     rtt.println(payload);
 }

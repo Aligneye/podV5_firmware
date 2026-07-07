@@ -23,6 +23,7 @@ void trainingGetFilteredAccel(float* outY, float* outZ);
 void sleepPostureSensor();
 void wakePostureSensor();
 bool isDeviceMoving();
+extern bool isTrainingMotorAlertActive;
 
 bool     isTrainingSessionActive();
 uint32_t getTrainingSessionNumber();

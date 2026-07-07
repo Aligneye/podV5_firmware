@@ -2,6 +2,7 @@
 #include "button.h"
 #include "bluetooth.h"
 #include "calibration.h"
+#include "sleep.h"
 #include "motor.h"
 #include "session_stats.h"
 #include <math.h>
@@ -21,6 +22,7 @@ static unsigned long patternStartMs = 0;
 static unsigned long lastTickMs = 0;
 static bool patternsInitialized = false;
 static uint32_t therapySessionId = 0;
+bool isTherapyRunning = false;
 
 
 #define MAX_THERAPY_PATTERNS 30
@@ -266,6 +268,7 @@ void therapySetup() {
     motorSetup();
     therapyState = THERAPY_IDLE;
     patternsInitialized = false;
+    isTherapyRunning = false;
 }
 
 void therapyStart() {
@@ -279,9 +282,11 @@ void therapyStart() {
     patternStartMs = therapyStartMs;
     lastTickMs = therapyStartMs;
     therapyState = THERAPY_RUNNING;
+    isTherapyRunning = true;
     patternsInitialized = false;
     currentPatternIndex = 0;
     initializePatternSequence();
+    inactivityTimerReset();
 
     rtt.print("Therapy: starting — sub-mode ");
     rtt.print((int)therapySubModeIndex);
@@ -292,9 +297,11 @@ void therapyStart() {
 }
 
 void therapyStop(bool returnToTraining) {
-    motorSetDuty(0);
     therapyState = THERAPY_IDLE;
+    isTherapyRunning = false;
     patternsInitialized = false;
+    motorSetDuty(0);
+    motorUpdate();
     if (returnToTraining) {
         rtt.println("Therapy: session complete — switching to Training mode");
         setDeviceMode(MODE_TRAINING);
@@ -351,7 +358,7 @@ void therapyLoop() {
 }
 
 bool therapyIsRunning() {
-    return currentMode == MODE_THERAPY && therapyState == THERAPY_RUNNING;
+    return isTherapyRunning && currentMode == MODE_THERAPY && therapyState == THERAPY_RUNNING;
 }
 
 unsigned long therapyGetElapsedMs() {

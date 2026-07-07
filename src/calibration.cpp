@@ -1,6 +1,7 @@
 #include "calibration.h"
 #include "bluetooth.h"
 #include "button.h"
+#include "sleep.h"
 #include "motor.h"
 #include "therapy.h"
 #include "training.h"
@@ -29,6 +30,7 @@ static constexpr float    kEarlyFailStdDevLimit    = 1.75f;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
+bool isCalibrationRunning = false;
 
 static unsigned long stabilityStartTime = 0;
 static unsigned long lastHoldPrintMs     = 0;
@@ -101,6 +103,7 @@ static void goToIdleMode() {
 
 static void calibrationFail(const char* reason) {
     calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
     strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibResultSetAt = millis();
@@ -138,6 +141,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
 
     if (quality < 50) {
         calibState = CALIB_STATE_IDLE;
+        isCalibrationRunning = false;
         strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
         lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
         calibResultSetAt = millis();
@@ -169,6 +173,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
 
     if (!saveSuccess) {
         calibState = CALIB_STATE_IDLE;
+        isCalibrationRunning = false;
         strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
         lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
         calibResultSetAt = millis();
@@ -188,6 +193,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     }
 
     calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
     strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibResultSetAt = millis();
@@ -282,6 +288,7 @@ void setPendingCalibrationName(const char* name) {
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 void initCalibration() {
     calibState   = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
     pendingStart = false;
     pendingCancel = false;
     motorSetDuty(0);
@@ -489,8 +496,10 @@ void startCalibration() {
     motorOverrideDuty(150, 150);
 
     calibState         = CALIB_STATE_GET_READY;
+    isCalibrationRunning  = true;
     stabilityStartTime = millis();
     lastHoldPrintMs    = millis();
+    inactivityTimerReset();
 
     totalSamples = 0;
 
@@ -508,7 +517,9 @@ void cancelCalibration() {
     logEvent("CALIB", "cancelled");
     notifyCalibrationStatus("cancelled", "done");
     calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
     motorSetDuty(0);
+    motorUpdate();
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastCalibrationValid = false;
@@ -531,7 +542,7 @@ const char* getCalibrationResult() {
 }
 
 bool isCalibrating() {
-    return calibState != CALIB_STATE_IDLE;
+    return isCalibrationRunning;
 }
 
 uint32_t getCalibrationElapsedMs() {

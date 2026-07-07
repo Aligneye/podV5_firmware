@@ -77,4 +77,5 @@ void calibrationRequestCancel();
 void calibrationStart();
 void calibrationStop();
 bool calibrationIsActive();
+extern bool isCalibrationRunning;
 bool calibrationMotorActive();
