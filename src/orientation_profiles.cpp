@@ -112,6 +112,7 @@ bool addCalibrationProfile(const char* name) {
     if (s_profileCount >= 8) return false;
 
     OrientationProfile& p = s_profiles[s_profileCount++];
+    const uint8_t newIndex = (uint8_t)(s_profileCount - 1u);
     assignProfileDefaults(p);
     p.id = nextProfileId();
     copyProfileName(p.name, name);
@@ -125,7 +126,14 @@ bool addCalibrationProfile(const char* name) {
         s_profileCount--; // Rollback in-memory profile count
         return false;
     }
-    storageSaveActiveProfileIndex(p.id);
+
+    // Activate the newly created profile immediately so the running device uses it.
+    // The storage layer persists active profiles by index, not by profile id.
+    s_activeProfileId = p.id;
+    storageSaveActiveProfileIndex((int8_t)newIndex);
+    setPostureOrigin3D(p.refX, p.refY, p.refZ);
+    setOrientationLabel(p.name);
+
     if (s_defaultProfileId == 0u) {
         s_defaultProfileId = p.id;
         storageSaveDefaultProfileId(s_defaultProfileId);

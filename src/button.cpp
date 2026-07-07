@@ -7,7 +7,7 @@
 #include "device_time.h"
 #include "training.h"
 #include <OneButton.h>
-#include "monitor_log.h"
+#include "rtt_debugger.h"
 
 #ifdef DEBUG_LOGGING
 #define DEBUG_PRINT(x) rtt.print(x)
@@ -173,6 +173,7 @@ static void handleHold() {
     return;
   }
 
+  setDeviceMode(MODE_IDLE);
   calibrationRequestStart();
 }
 

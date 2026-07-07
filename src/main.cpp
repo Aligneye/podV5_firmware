@@ -11,7 +11,7 @@
 #include "device_time.h"
 #include "motor.h"
 #include "session_stats.h"
-#include "monitor_log.h"
+#include "rtt_debugger.h"
 
 RTTStream rtt;
 
@@ -46,6 +46,7 @@ void loop() {
     motorUpdate();
     bluetoothLoop();
     calibrationLoop();
+    rttDebuggerLoop();
     if (currentMode == MODE_IDLE || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
         return;
     }

@@ -9,7 +9,7 @@
 #include "session_stats.h"
 #include "BatteryMonitor.h"
 #include "version.h"
-#include "monitor_log.h"
+#include "rtt_debugger.h"
 #include <cstring>
 #include <bluefruit.h>
 #include <ble_hci.h>
@@ -23,8 +23,6 @@ using namespace Adafruit_LittleFS_Namespace;
 #endif
 
 int therapyIntensityLevel = 2; // Default to Mid (2)
-
-extern RTTStream rtt;
 
 static bool connected = false;
 static bool bleInitialized = false;
@@ -82,19 +80,15 @@ static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void updateBatteryReading(unsigned long now);
 
-static void rttPrintBlePacket(const char* direction, const char* payload) {
-    if (!direction || !payload) return;
-    rtt.print("[BLE ");
-    rtt.print(direction);
-    rtt.print("] ");
-    rtt.println(payload);
-}
-
 static void sendBlePacket(const char* payload) {
     if (!pCharacteristic || !payload) return;
     pCharacteristic->write(payload);
     pCharacteristic->notify(payload);
-    rttPrintBlePacket("TX", payload);
+    // RTT mirror moved to rtt_debugger.cpp.
+    // Uncomment the old inline RTT print below if you ever want BLE and RTT
+    // coupled again inside bluetooth.cpp.
+    // rttPrintBlePacket("TX", payload);
+    rttDebuggerPrintBlePacket("TX", payload);
 }
 
 static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* error = nullptr) {
@@ -475,7 +469,9 @@ static void onBleConnect(uint16_t conn_handle) {
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
     turnRgbLedOff();
-    rtt.println("[BLE EVT] connected");
+    // RTT trace intentionally disabled here.
+    // Uncomment if you want connection events mirrored locally again.
+    // rtt.println("[BLE EVT] connected");
 }
 
 static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
@@ -487,11 +483,11 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     disconnectionHapticPending = true;
     forceLiveSync = false;
     connectedSinceMs = 0UL;
-    rtt.print("[BLE EVT] disconnected reason=0x");
-    rtt.print(reason, HEX);
-    rtt.print(" (");
-    rtt.print(bleDisconnectReasonText(reason));
-    rtt.println(")");
+    // rtt.print("[BLE EVT] disconnected reason=0x");
+    // rtt.print(reason, HEX);
+    // rtt.print(" (");
+    // rtt.print(bleDisconnectReasonText(reason));
+    // rtt.println(")");
 
     if (clearBondsAfterDisconnect) {
         clearBondsAfterDisconnect = false;
@@ -506,7 +502,7 @@ static void onBleSecured(uint16_t conn_handle) {
     blePairingKnownPaired = true;
     pairingUnlockActive = false;
     connectionHapticPending = true;
-    rtt.println("[BLE EVT] secured");
+    // rtt.println("[BLE EVT] secured");
 }
 
 static void applyTrainingTiming(const String &valueRaw) {
@@ -517,13 +513,13 @@ static void applyTrainingTiming(const String &valueRaw) {
     TrainingAlertStyle previous = trainingSubModeIndex;
     if (value == "INSTANT") {
         trainingSubModeIndex = TrainingAlertStyle::Instant; // Instant
-        rtt.println("BLE CMD: POSTURE_TIMING=INSTANT");
+        // rtt.println("BLE CMD: POSTURE_TIMING=INSTANT");
     } else if (value == "DELAYED") {
         trainingSubModeIndex = TrainingAlertStyle::Delayed; // Delayed
-        rtt.println("BLE CMD: POSTURE_TIMING=DELAYED");
+        // rtt.println("BLE CMD: POSTURE_TIMING=DELAYED");
     } else if (value == "AUTOMATIC") {
         trainingSubModeIndex = TrainingAlertStyle::Instant; // Fallback to Instant
-        rtt.println("BLE CMD: POSTURE_TIMING=AUTOMATIC");
+        // rtt.println("BLE CMD: POSTURE_TIMING=AUTOMATIC");
     }
 
     if (currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
@@ -553,12 +549,12 @@ static void applyTherapyDurationMinutes(const String &valueRaw) {
             markSubModeChanged();
         }
     }
-    rtt.printf("BLE CMD: THERAPY_DURATION_MIN=%d\n", mins);
+    // rtt.printf("BLE CMD: THERAPY_DURATION_MIN=%d\n", mins);
 }
 
 static void applyMode(const String &valueRaw) {
     if (isCalibrating()) {
-        rtt.println("BLE CMD: MODE change ignored - calibration in progress");
+        // rtt.println("BLE CMD: MODE change ignored - calibration in progress");
         return;
     }
 
@@ -575,7 +571,7 @@ static void applyMode(const String &valueRaw) {
         if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
             markSubModeChanged();
         }
-        rtt.println("BLE CMD: MODE=TRACKING");
+        // rtt.println("BLE CMD: MODE=TRACKING");
     } else if (value == "TRAINING" || value == "POSTURE") {
         deviceOn = true;
         TrainingAlertStyle previous = trainingSubModeIndex;
@@ -586,11 +582,13 @@ static void applyMode(const String &valueRaw) {
         if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
             markSubModeChanged();
         }
-        logEvent("BLE", "mode_training");
+        // RTT trace disabled here on purpose.
+        // Uncomment if you want bluetooth.cpp to emit BLE state changes to RTT.
+        // logEvent("BLE", "mode_training");
     } else if (value == "THERAPY") {
         deviceOn = true;
         setDeviceMode(MODE_THERAPY);
-        logEvent("BLE", "mode_therapy");
+        // logEvent("BLE", "mode_therapy");
     }
 }
 
@@ -603,7 +601,7 @@ static void stopTherapyFromBle() {
     deviceOn = true;
     forceTelemetrySync = true;
     forceLiveSync = true;
-    logEvent("BLE", "therapy_stop");
+    // logEvent("BLE", "therapy_stop");
 }
 
 static void applyCalibrationControl(const String &valueRaw) {
@@ -614,11 +612,11 @@ static void applyCalibrationControl(const String &valueRaw) {
     if (value == "START") {
         if (isCalibrating()) return;
         calibrationRequestStart();
-        logEvent("BLE", "calibration_start");
+        // logEvent("BLE", "calibration_start");
     } else if (value == "CANCEL") {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
-        logEvent("BLE", "calibration_cancel");
+        // logEvent("BLE", "calibration_cancel");
     }
 }
 
@@ -631,11 +629,11 @@ static void applyAction(const String &valueRaw) {
         if (isCalibrating()) return;
         deviceOn = true;
         startCalibration();
-        logEvent("BLE", "action_calibrate");
+        // logEvent("BLE", "action_calibrate");
     } else if (value == "CALIBRATE_CANCEL") {
         if (!isCalibrating()) return;
         calibrationRequestCancel();
-        logEvent("BLE", "action_calibrate_cancel");
+        // logEvent("BLE", "action_calibrate_cancel");
     } else if (value == "STOP_THERAPY" || value == "THERAPY_STOP" ||
                value == "STOP THERAPY" || value == "STOP") {
         stopTherapyFromBle();
@@ -643,16 +641,16 @@ static void applyAction(const String &valueRaw) {
         if (pendingDfuEnter) return;
         pendingDfuEnter = true;
         notifyDfuStatus("ARMED");
-        logEvent("BLE", "action_enter_dfu");
+        // logEvent("BLE", "action_enter_dfu");
     } else if (value == "GET_DEVICE_INFO") {
         sendDeviceInfoPacket();
-        logEvent("BLE", "action_device_info");
+        // logEvent("BLE", "action_device_info");
     } else if (value == "PROFILE_CLEAR" || value == "CLEAR_PROFILES") {
         clearCalibrationProfiles();
-        logEvent("BLE", "action_profile_clear");
+        // logEvent("BLE", "action_profile_clear");
     } else if (value == "FACTORY_RESET") {
         pendingFactoryReset = true;
-        logEvent("BLE", "action_factory_reset");
+        // logEvent("BLE", "action_factory_reset");
     }
 }
 
@@ -728,7 +726,7 @@ static void applyTimeSync(const String &valueRaw) {
         setDeviceTime(epoch);
         char payload[48];
         snprintf(payload, sizeof(payload), "{\"time\":%ld}", epoch);
-        logPacket("BLE", payload);
+        // logPacket("BLE", payload);
     }
 }
 
@@ -739,7 +737,7 @@ static void applyTZOffset(const String &valueRaw) {
     setDeviceTZOffset(tz);
     char payload[48];
     snprintf(payload, sizeof(payload), "{\"tz\":%ld}", tz);
-    logPacket("BLE", payload);
+    // logPacket("BLE", payload);
 }
 
 static void applyTherapyIntensity(const String &valueRaw) {
@@ -750,7 +748,7 @@ static void applyTherapyIntensity(const String &valueRaw) {
         therapyIntensityLevel = level;
         char payload[48];
         snprintf(payload, sizeof(payload), "{\"therapy_intensity\":%d}", level);
-        logPacket("BLE", payload);
+        // logPacket("BLE", payload);
     }
 }
 
@@ -762,7 +760,7 @@ static void applyDifficultyDegrees(const String &valueRaw) {
         kBadPostureDeg = (float)deg;
         char payload[48];
         snprintf(payload, sizeof(payload), "{\"difficulty_deg\":%d}", deg);
-        logPacket("BLE", payload);
+        // logPacket("BLE", payload);
     }
 }
 
@@ -775,13 +773,13 @@ static void applyProfileSelection(const String &valueRaw) {
     upper.toUpperCase();
     if (upper == "CLEAR" || upper == "RESET") {
         clearCalibrationProfiles();
-        logEvent("BLE", "profile_clear");
+        // logEvent("BLE", "profile_clear");
         return;
     }
 
     if (upper == "DEFAULT") {
         selectDefaultCalibrationProfile();
-        logEvent("BLE", "profile_default");
+        // logEvent("BLE", "profile_default");
         return;
     }
 
@@ -790,11 +788,11 @@ static void applyProfileSelection(const String &valueRaw) {
         if (selectCalibrationProfile((uint8_t)(requestedIndex - 1))) {
             char payload[64];
             snprintf(payload, sizeof(payload), "{\"profile_index\":%d}", requestedIndex);
-            logPacket("BLE", payload);
+            // logPacket("BLE", payload);
         } else {
             char payload[80];
             snprintf(payload, sizeof(payload), "{\"profile_index\":%d,\"ignored\":true}", requestedIndex);
-            logPacket("BLE", payload);
+            // logPacket("BLE", payload);
         }
         return;
     }
@@ -808,14 +806,14 @@ static void applyProfileSelection(const String &valueRaw) {
             selectCalibrationProfile(i);
             char payload[96];
             snprintf(payload, sizeof(payload), "{\"profile\":\"%s\"}", profile->name);
-            logPacket("BLE", payload);
+            // logPacket("BLE", payload);
             return;
         }
     }
 
     char payload[128];
     snprintf(payload, sizeof(payload), "{\"profile\":\"%s\",\"ignored\":true}", value.c_str());
-    logPacket("BLE", payload);
+    // logPacket("BLE", payload);
 }
 
 static void applyProfileCommand(const String& valueRaw) {
@@ -964,7 +962,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 if (!pendingDfuEnter) {
                     pendingDfuEnter = true;
                     notifyDfuStatus("ARMED");
-                    logEvent("BLE", "cmd_enter_dfu");
+                    // logEvent("BLE", "cmd_enter_dfu");
                 }
                 ok = true;
             } else if (cmd == "FACTORY_RESET") {
@@ -1116,14 +1114,14 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
     }
 
 #if ALIGN_RTT_BLE_RX_LOG
-    rttPrintBlePacket("RX", payload.c_str());
+    rttDebuggerPrintBlePacket("RX", payload.c_str());
 #endif
     parseAndApplyBleCommand(payload);
 }
 
 void bluetoothSetup() {
-    rtt.print("[BLE EVT] init ");
-    rtt.println(BLE_DEVICE_NAME);
+    // rtt.print("[BLE EVT] init ");
+    // rtt.println(BLE_DEVICE_NAME);
     pinMode(PIN_LED_RED, OUTPUT);
     pinMode(PIN_LED_GREEN, OUTPUT);
     pinMode(PIN_LED_BLUE, OUTPUT);
@@ -1151,7 +1149,7 @@ void bluetoothSetup() {
         gCharacteristic.setMaxLen(512);
         gCharacteristic.setWriteCallback(onCharacteristicWrite);
         gCharacteristic.begin();
-        rttPrintBlePacket("TX", "{}");
+        rttDebuggerPrintBlePacket("TX", "{}");
 
         pCharacteristic = &gCharacteristic;
         bleInitialized = true;
@@ -1170,7 +1168,7 @@ void bluetoothLoop() {
 
     if (pendingDfuEnter) {
         pendingDfuEnter = false;
-        rtt.println("DFU: entering OTA bootloader");
+        // rtt.println("DFU: entering OTA bootloader");
         notifyDfuStatus("ENTERED");
         delay(50);
         enterOTADfu();
@@ -1312,7 +1310,7 @@ void bluetoothLoop() {
                  batteryMillivolts,
                  batteryPercentage,
                  (unsigned long)getDeviceStepCount());
-        rttPrintBlePacket("TX", statusBuffer);
+        rttDebuggerPrintBlePacket("TX", statusBuffer);
     }
 #endif
 
@@ -1392,12 +1390,12 @@ bool bluetoothIsMotorActive() {
 }
 
 void bluetoothStartAdvertising() {
-    rtt.println("[BLE EVT] start advertising");
+    // rtt.println("[BLE EVT] start advertising");
     startAdvertising();
 }
 
 void bluetoothStopAdvertising() {
-    rtt.println("[BLE EVT] stop advertising");
+    // rtt.println("[BLE EVT] stop advertising");
     Bluefruit.Advertising.stop();
 }
 
@@ -1406,7 +1404,7 @@ bool bluetoothIsConnected() {
 }
 
 void bluetoothUnlockForPairing() {
-    rtt.println("[BLE EVT] unlock pairing - clearing bonds");
+    // rtt.println("[BLE EVT] unlock pairing - clearing bonds");
 
     batteryBlinkActive = false;
     pairingUnlockActive = true;
