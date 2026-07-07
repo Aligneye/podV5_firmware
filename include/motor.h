@@ -10,3 +10,5 @@ void motorStartCalmHaptic(uint16_t durationMs = 180);
 void motorCancelCalmHaptic();
 void motorCancelFeedback();
 bool motorIsActive();
+bool motorOutputIsOn();
+extern bool motorActive;

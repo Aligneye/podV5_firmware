@@ -1,6 +1,7 @@
 #include "training.h"
 #include "button.h"
 #include "calibration.h"
+#include "sleep.h"
 #include "motor.h"
 #include "session_stats.h"
 #include "step_count.h"
@@ -213,6 +214,7 @@ static bool s_vibOn = false;
 /** Motor uses same rule as ESP32 isBadPosture (forward > 25° + debounce). */
 static bool s_forwardMotorBad = false;
 static unsigned long s_trainingStartMs = 0;
+bool isTrainingMotorAlertActive = false;
 
 static void loadStoredCalibration() {
   float loadedY = kDefaultOriginY;
@@ -503,6 +505,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   if (calibrationMotorActive()) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -512,6 +515,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
     s_vibToggleMs = 0;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -522,6 +526,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
     motorSetDuty(0);
     s_badMotorStartMs = 0;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -530,6 +535,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
     s_vibToggleMs = 0;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -540,9 +546,12 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   const unsigned long delayMs = (trainingSubModeIndex == TrainingAlertStyle::Instant) ? 200UL : 5000UL;
   if ((now - s_badMotorStartMs) < delayMs) {
     motorSetDuty(0);
+    isTrainingMotorAlertActive = false;
     return;
   }
 
+  isTrainingMotorAlertActive = true;
+  inactivityTimerReset();
   const unsigned long vibInterval = 500UL;
   if ((now - s_vibToggleMs) >= vibInterval) {
     s_vibToggleMs = now;
@@ -572,15 +581,18 @@ uint32_t getDeviceStepCount() { return stepCountGetTotal(); }
 void trainingStart() {
   rtt.println("Training: start");
   s_trainingStartMs = millis();
+  isTrainingMotorAlertActive = false;
   onTrainingStarted();
 }
 
 void trainingStop() {
-  motorSetDuty(0);
   s_badMotorStartMs = 0;
   s_vibOn = false;
   s_vibToggleMs = 0;
   s_forwardMotorBad = false;
+  isTrainingMotorAlertActive = false;
+  motorSetDuty(0);
+  motorUpdate();
   rtt.println("Training: stop");
   onTrainingEnded();
 }

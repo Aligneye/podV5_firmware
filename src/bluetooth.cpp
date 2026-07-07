@@ -33,6 +33,7 @@ static bool clearBondsAfterDisconnect = false;
 static bool connectionHapticPending = false;
 static bool connectionHapticPlayed = false;
 static bool disconnectionHapticPending = false;
+static bool sleepShutdownRequested = false;
 static bool forceTelemetrySync = false;
 static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
@@ -492,6 +493,11 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     if (clearBondsAfterDisconnect) {
         clearBondsAfterDisconnect = false;
         Bluefruit.Periph.clearBonds();
+    }
+
+    if (sleepShutdownRequested) {
+        sleepShutdownRequested = false;
+        return;
     }
 
     startAdvertising();
@@ -1397,6 +1403,17 @@ void bluetoothStartAdvertising() {
 void bluetoothStopAdvertising() {
     // rtt.println("[BLE EVT] stop advertising");
     Bluefruit.Advertising.stop();
+}
+
+void bluetoothPrepareForSleep() {
+    sleepShutdownRequested = true;
+    bluetoothStopAdvertising();
+
+    if (currentConnHandle != BLE_CONN_HANDLE_INVALID && Bluefruit.connected(currentConnHandle)) {
+        Bluefruit.disconnect(currentConnHandle);
+    } else {
+        sleepShutdownRequested = false;
+    }
 }
 
 bool bluetoothIsConnected() {

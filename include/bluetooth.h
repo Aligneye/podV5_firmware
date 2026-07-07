@@ -9,6 +9,7 @@ void bluetoothLoop();
 
 void bluetoothStartAdvertising();
 void bluetoothStopAdvertising();
+void bluetoothPrepareForSleep();
 bool bluetoothIsConnected();
 void bluetoothUnlockForPairing();
 
