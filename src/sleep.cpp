@@ -9,6 +9,7 @@ extern RTTStream rtt;
 static uint32_t s_lastResetMs = 0;
 static bool s_prevActive = false;
 static bool s_sleeping = false;
+static uint32_t s_holdoffUntilMs = 0;
 static constexpr uint32_t kInactivitySleepTimeoutMs = 5000UL;
 static constexpr uint16_t kSleepLedBlinkOnMs = 80;
 static constexpr uint16_t kSleepLedBlinkGapMs = 40;
@@ -99,8 +100,28 @@ void inactivityTimerReset() {
     s_lastResetMs = millis();
 }
 
+void inactivityTimerHoldoffAfterCalibration(uint32_t delayMs) {
+    const uint32_t now = millis();
+    const uint32_t until = now + delayMs;
+    if ((int32_t)(until - s_holdoffUntilMs) > 0) {
+        s_holdoffUntilMs = until;
+    }
+}
+
 void inactivityTimerLoop() {
     const uint32_t now = millis();
+    const bool holdoffActive = (s_holdoffUntilMs != 0u) &&
+                               ((int32_t)(now - s_holdoffUntilMs) < 0);
+    if (!holdoffActive && s_holdoffUntilMs != 0u) {
+        s_holdoffUntilMs = 0u;
+    }
+
+    if (holdoffActive) {
+        s_lastResetMs = now;
+        s_prevActive = true;
+        return;
+    }
+
     const bool active = inactivityTimerHasActivity();
 
     if (active) {
