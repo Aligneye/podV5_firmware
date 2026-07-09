@@ -254,7 +254,7 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
     char subModeStr[16];
     if (currentMode == MODE_TRAINING) {
         if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
-            strcpy(subModeStr, "INSTANT");
+            strcpy(subModeStr, "NO_ALERTS");
         } else if (trainingSubModeIndex == TrainingAlertStyle::Instant) {
             strcpy(subModeStr, "INSTANT");
         } else {
@@ -511,7 +511,7 @@ static void onBleSecured(uint16_t conn_handle) {
     // rtt.println("[BLE EVT] secured");
 }
 
-static void applyTrainingTiming(const String &valueRaw) {
+static bool applyTrainingTiming(const String &valueRaw) {
     String value = valueRaw;
     value.trim();
     value.toUpperCase();
@@ -526,18 +526,29 @@ static void applyTrainingTiming(const String &valueRaw) {
     } else if (value == "AUTOMATIC") {
         trainingSubModeIndex = TrainingAlertStyle::Instant; // Fallback to Instant
         // rtt.println("BLE CMD: POSTURE_TIMING=AUTOMATIC");
+    } else if (value == "NO_ALERT" || value == "NO_ALERTS" ||
+               value == "NO ALERT" || value == "NO ALERTS" ||
+               value == "TRACKING" || value == "OFF" || value == "NONE") {
+        trainingSubModeIndex = TrainingAlertStyle::NoAlerts;
+    } else {
+        return false;
     }
 
     if (currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
         markSubModeChanged();
     }
+    if (trainingSubModeIndex != previous) {
+        forceTelemetrySync = true;
+        forceLiveSync = true;
+    }
+    return true;
 }
 
-static void applyTherapyDurationMinutes(const String &valueRaw) {
+static bool applyTherapyDurationMinutes(const String &valueRaw) {
     String value = valueRaw;
     value.trim();
     int mins = value.toInt();
-    if (mins <= 0) return;
+    if (mins <= 0) return false;
 
     uint8_t previous = therapySubModeIndex;
     if (mins == 10) {
@@ -547,21 +558,25 @@ static void applyTherapyDurationMinutes(const String &valueRaw) {
     } else if (mins == 30) {
         therapySubModeIndex = 2;
     } else {
-        therapySubModeIndex = 0; // default 10 min
+        return false;
     }
     if (therapySubModeIndex != previous) {
+        storageSaveTherapySubMode(therapySubModeIndex);
+        forceTelemetrySync = true;
+        forceLiveSync = true;
         if (currentMode == MODE_THERAPY) {
             therapyStop(false);
             markSubModeChanged();
         }
     }
     // rtt.printf("BLE CMD: THERAPY_DURATION_MIN=%d\n", mins);
+    return true;
 }
 
-static void applyMode(const String &valueRaw) {
+static bool applyMode(const String &valueRaw) {
     if (isCalibrating()) {
         // rtt.println("BLE CMD: MODE change ignored - calibration in progress");
-        return;
+        return false;
     }
 
     String value = valueRaw;
@@ -569,7 +584,8 @@ static void applyMode(const String &valueRaw) {
     value.toUpperCase();
 
     Mode previousMode = currentMode;
-    if (value == "TRACKING") {
+    if (value == "TRACKING" || value == "NO_ALERT" || value == "NO_ALERTS" ||
+        value == "NO ALERT" || value == "NO ALERTS") {
         deviceOn = true;
         TrainingAlertStyle previous = trainingSubModeIndex;
         trainingSubModeIndex = TrainingAlertStyle::NoAlerts; // No alerts (equivalent to tracking)
@@ -577,7 +593,10 @@ static void applyMode(const String &valueRaw) {
         if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
             markSubModeChanged();
         }
+        forceTelemetrySync = true;
+        forceLiveSync = true;
         // rtt.println("BLE CMD: MODE=TRACKING");
+        return true;
     } else if (value == "TRAINING" || value == "POSTURE") {
         deviceOn = true;
         TrainingAlertStyle previous = trainingSubModeIndex;
@@ -588,14 +607,26 @@ static void applyMode(const String &valueRaw) {
         if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
             markSubModeChanged();
         }
+        forceTelemetrySync = true;
+        forceLiveSync = true;
         // RTT trace disabled here on purpose.
         // Uncomment if you want bluetooth.cpp to emit BLE state changes to RTT.
         // logEvent("BLE", "mode_training");
+        return true;
     } else if (value == "THERAPY") {
         deviceOn = true;
         setDeviceMode(MODE_THERAPY);
+        forceTelemetrySync = true;
+        forceLiveSync = true;
         // logEvent("BLE", "mode_therapy");
+        return true;
+    } else if (value == "IDLE" || value == "OFF") {
+        setDeviceMode(MODE_IDLE);
+        forceTelemetrySync = true;
+        forceLiveSync = true;
+        return true;
     }
+    return false;
 }
 
 static void stopTherapyFromBle() {
@@ -873,6 +904,15 @@ static bool extractJsonIntField(const String& payload, const char* key, uint32_t
     return true;
 }
 
+static bool extractFirstJsonStringField(const String& payload, String& out, const char* const* keys, uint8_t count) {
+    for (uint8_t i = 0; i < count; i++) {
+        if (extractJsonStringField(payload, keys[i], out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void parseAndApplyBleCommand(const String &payloadRaw) {
     String payload = payloadRaw;
     payload.trim();
@@ -891,6 +931,55 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             if (cmd == "GET_PROFILES") {
                 pendingProfileListSend = true;
                 ok = true;
+            } else if (cmd == "SET_MODE") {
+                String mode;
+                static const char* const modeKeys[] = {"mode", "MODE"};
+                if (extractFirstJsonStringField(payload, mode, modeKeys, 2)) {
+                    ok = applyMode(mode);
+                    if (!ok) error = isCalibrating() ? "CALIBRATING" : "BAD_MODE";
+
+                    String timing;
+                    static const char* const timingKeys[] = {
+                        "sub_mode", "subMode", "training_submode", "trainingSubMode",
+                        "posture_timing", "postureTiming", "timing"
+                    };
+                    if (extractFirstJsonStringField(payload, timing, timingKeys, 7)) {
+                        bool timingOk = applyTrainingTiming(timing);
+                        if (!timingOk) {
+                            ok = false;
+                            error = "BAD_SUB_MODE";
+                        }
+                    }
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "POSTURE_TIMING" || cmd == "TRAINING_SUBMODE" ||
+                       cmd == "SET_TRAINING_SUBMODE" || cmd == "SET_POSTURE_TIMING") {
+                String timing;
+                static const char* const timingKeys[] = {
+                    "value", "sub_mode", "subMode", "training_submode",
+                    "trainingSubMode", "posture_timing", "postureTiming", "timing", "mode"
+                };
+                if (extractFirstJsonStringField(payload, timing, timingKeys, 9)) {
+                    ok = applyTrainingTiming(timing);
+                    if (!ok) error = "BAD_SUB_MODE";
+                } else {
+                    error = "BAD_REQUEST";
+                }
+            } else if (cmd == "SET_THERAPY_DURATION" || cmd == "THERAPY_DURATION" ||
+                       cmd == "THERAPY_DURATION_MIN") {
+                uint32_t minutes = 0u;
+                if (extractJsonIntField(payload, "minutes", minutes) ||
+                    extractJsonIntField(payload, "duration_min", minutes) ||
+                    extractJsonIntField(payload, "durationMin", minutes) ||
+                    extractJsonIntField(payload, "value", minutes)) {
+                    char minsBuf[12];
+                    snprintf(minsBuf, sizeof(minsBuf), "%lu", (unsigned long)minutes);
+                    ok = applyTherapyDurationMinutes(String(minsBuf));
+                    if (!ok) error = "BAD_DURATION";
+                } else {
+                    error = "BAD_REQUEST";
+                }
             } else if (cmd == "CALIBRATE_CANCEL") {
                 requestCalibrationCancel();
                 ok = true;
@@ -1119,9 +1208,7 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
         payload += (char)data[i];
     }
 
-#if ALIGN_RTT_BLE_RX_LOG
     rttDebuggerPrintBlePacket("RX", payload.c_str());
-#endif
     parseAndApplyBleCommand(payload);
 }
 
@@ -1206,7 +1293,7 @@ void bluetoothLoop() {
     char subModeStr[16];
     if (currentMode == MODE_TRAINING) {
         if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
-            strcpy(subModeStr, "INSTANT");
+            strcpy(subModeStr, "NO_ALERTS");
         } else if (trainingSubModeIndex == TrainingAlertStyle::Instant) {
             strcpy(subModeStr, "INSTANT");
         } else {

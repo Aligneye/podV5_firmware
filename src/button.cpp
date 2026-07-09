@@ -18,6 +18,8 @@
 #endif
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── Name arrays ────────────────────────────────────────────────────────────
 const char *modeNames[] = {"Training Mode", "Therapy Mode", "Idle Mode", "DFU Mode"};

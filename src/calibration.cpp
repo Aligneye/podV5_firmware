@@ -11,6 +11,8 @@
 #include <string.h>
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── State Machine Timings ───────────────────────────────────────────────────
 enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };

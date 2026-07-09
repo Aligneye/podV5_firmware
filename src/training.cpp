@@ -31,6 +31,8 @@ Matlab ye file posture training ka brain hai.
 */
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── Spec constants ─────────────────────────────────────────────────────────
 static constexpr float kLpfAlpha = 0.1f;

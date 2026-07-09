@@ -5,6 +5,8 @@
 #include "nrf_soc.h"
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 static uint32_t s_lastResetMs = 0;
 static bool s_prevActive = false;
