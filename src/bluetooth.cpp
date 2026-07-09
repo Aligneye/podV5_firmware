@@ -763,11 +763,19 @@ static void sendProfileList() {
 
 static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint8_t slot = 0, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr, float refX = 0.0f, float refY = 0.0f, float refZ = 0.0f, uint16_t passedSamples = 0) {
     if (!pCharacteristic || !connected) return;
-    char payload[256];
+    char payload[320];
     if (success) {
         snprintf(payload, sizeof(payload),
-                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"profile_id\":%lu,\"name\":\"%s\",\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"total_samples\":%u,\"passed_samples\":%u}",
-                 (unsigned long)profileId, name ? name : "", refX, refY, refZ, (unsigned)samples, (unsigned)passedSamples);
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"profile_id\":%lu,\"name\":\"%s\",\"slot\":%u,\"quality\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"total_samples\":%u,\"passed_samples\":%u}",
+                 (unsigned long)profileId,
+                 name ? name : "",
+                 (unsigned)slot,
+                 (unsigned)quality,
+                 refX,
+                 refY,
+                 refZ,
+                 (unsigned)samples,
+                 (unsigned)passedSamples);
     } else {
         snprintf(payload, sizeof(payload),
                  "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"failed\",\"reason\":\"%s\"}",
@@ -963,16 +971,22 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                     error = "BAD_REQUEST";
                 }
             } else if (cmd == "CALIBRATE_CANCEL") {
-                requestCalibrationCancel();
-                ok = true;
+                if (isCalibrating()) {
+                    requestCalibrationCancel();
+                    ok = true;
+                } else {
+                    error = "NOT_CALIBRATING";
+                }
             } else if (cmd == "CALIBRATE_START") {
                 String profileName = "Profile";
                 String slotValue;
                 extractJsonStringField(payload, "slot", slotValue);
                 extractJsonStringField(payload, "name", profileName);
-                if (slotValue == "auto") {
-                    if (getProfileCount() >= 8) {
-                        error = "PROFILE_CREATE_FAILED";
+                slotValue.trim();
+                slotValue.toUpperCase();
+                if (slotValue.length() == 0 || slotValue == "AUTO") {
+                    if (isCalibrating()) {
+                        error = "ALREADY_CALIBRATING";
                     } else {
                         setPendingCalibrationName(profileName.c_str());
                         requestCalibrationStart();
@@ -1110,10 +1124,12 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
         if (cmdName == "GET_PROFILES") {
             pendingProfileListSend = true;
         } else if (cmdName == "CALIBRATE_CANCEL") {
-            requestCalibrationCancel();
+            if (isCalibrating()) {
+                requestCalibrationCancel();
+            }
         } else if (cmdName == "CALIBRATE_START") {
             String profileName = "Profile";
-            bool autoSlot = false;
+            bool autoSlot = true;
             start = 0;
             while (start < payloadLen) {
                 int end = payload.indexOf(';', start);
@@ -1127,16 +1143,17 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                     key.trim();
                     key.toUpperCase();
                     value.trim();
-                    if (key == "slot" && value == "auto") autoSlot = true;
+                    if (key == "slot") {
+                        value.toUpperCase();
+                        autoSlot = (value.length() == 0 || value == "AUTO");
+                    }
                     if (key == "name" && value.length() > 0) profileName = value;
                 }
                 start = end + 1;
             }
-            if (autoSlot) {
-                if (getProfileCount() < 8) {
-                    setPendingCalibrationName(profileName.c_str());
-                    requestCalibrationStart();
-                }
+            if (autoSlot && !isCalibrating()) {
+                setPendingCalibrationName(profileName.c_str());
+                requestCalibrationStart();
             }
         } else if (cmdName == "GET_THERAPY_PLAN") {
             if (therapyIsRunning()) {
