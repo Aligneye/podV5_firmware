@@ -45,7 +45,6 @@ static char lastMode[12] = "";
 static char lastSubMode[16] = "";
 static char lastProfile[32] = "";
 static uint32_t lastProfileId = 0u;
-static uint8_t lastBatteryPercentage = 255;
 static bool lastRunning = false;
 static unsigned long connectedSinceMs = 0;
 static bool therapyPlanSentForSession = false;
@@ -280,8 +279,7 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
     (void)reason;
     if (!pCharacteristic || !connected) return;
     if (isCalibrating()) return;
-
-    const unsigned long now = millis();
+    if (currentMode != MODE_TRAINING) return;
 
     char subModeStr[16];
     currentSubModeText(subModeStr, sizeof(subModeStr));
@@ -290,42 +288,44 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
     const uint32_t profileId = activeProfile ? activeProfile->id : 0u;
     const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
 
-    const char *modeString = currentModeText();
+    updatePostureAngle();
+    const bool badNow = (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg);
 
-    updateBatteryReading(now);
-
-    const bool runningNow = therapyIsRunning();
-
-    char telemetryBuffer[192];
+    char telemetryBuffer[256];
     snprintf(
       telemetryBuffer,
       sizeof(telemetryBuffer),
       "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
-      "\"running\":%s,"
-      "\"sid\":%lu,"
-      "\"duration\":%lu,"
-      "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
-      modeString,
+      "\"running\":true,"
+      "\"angle\":%.2f,"
+      "\"difficulty_angle\":%.0f,"
+      "\"posture\":\"%s\","
+      "\"bad\":%s,"
+      "\"delay_ms\":%lu,"
+      "\"alert_active\":%s,"
+      "\"profile_id\":%lu,\"profile\":\"%s\"}",
+      "TRAINING",
       subModeStr,
-      runningNow ? "true" : "false",
-      (unsigned long)therapyGetSessionId(),
-      therapyGetTotalDurationSeconds(),
+      currentAngle,
+      kBadPostureDeg,
+      badNow ? "BAD POSTURE" : "GOOD POSTURE",
+      badNow ? "true" : "false",
+      (unsigned long)trainingDelayedAlertMs,
+      isTrainingMotorAlertActive ? "true" : "false",
       (unsigned long)profileId,
-      profileName,
-      (unsigned)batteryPercentage
+      profileName
     );
     sendBlePacket(telemetryBuffer);
 
     // Update state caches
-    strncpy(lastMode, modeString, sizeof(lastMode) - 1);
+    strncpy(lastMode, "TRAINING", sizeof(lastMode) - 1);
     lastMode[sizeof(lastMode) - 1] = '\0';
     strncpy(lastSubMode, subModeStr, sizeof(lastSubMode) - 1);
     lastSubMode[sizeof(lastSubMode) - 1] = '\0';
     strncpy(lastProfile, profileName, sizeof(lastProfile) - 1);
     lastProfile[sizeof(lastProfile) - 1] = '\0';
     lastProfileId = profileId;
-    lastBatteryPercentage = batteryPercentage;
-    lastRunning = runningNow;
+    lastRunning = false;
     telemetryCacheValid = true;
 }
 
@@ -1295,7 +1295,6 @@ void bluetoothLoop() {
         strcmp(lastSubMode, subModeStr) != 0 ||
         strcmp(lastProfile, profileName) != 0 ||
         lastProfileId != profileId ||
-        lastBatteryPercentage != batteryPercentage ||
         lastRunning != runningNow;
 
     if (telemetryChanged) {
@@ -1329,12 +1328,11 @@ void bluetoothLoop() {
                 sendLivePacket();
             }
 
-            // 2. T: Send training/status telemetry every 1000 ms in TRAINING mode, or on force sync
-            if ((currentMode == MODE_TRAINING &&
-                 (forceTelemetrySync ||
-                  lastTrainingTelemetrySendMs == 0 ||
-                  ((now - lastTrainingTelemetrySendMs) >= TRAINING_TELEMETRY_INTERVAL_MS))) ||
-                (forceTelemetrySync && currentMode != MODE_TRAINING)) {
+            // 2. T: Send pure training telemetry every 1000 ms in TRAINING mode, or on force sync
+            if (currentMode == MODE_TRAINING &&
+                (forceTelemetrySync ||
+                 lastTrainingTelemetrySendMs == 0 ||
+                 ((now - lastTrainingTelemetrySendMs) >= TRAINING_TELEMETRY_INTERVAL_MS))) {
                 forceTelemetrySync = false;
                 lastTrainingTelemetrySendMs = now;
                 sendStatusTelemetry("loop", "training_1s");
