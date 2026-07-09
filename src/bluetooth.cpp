@@ -101,8 +101,8 @@ static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* e
                  (unsigned long)seq, cmd);
     } else {
         snprintf(payload, sizeof(payload),
-                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
-                 (unsigned long)seq, cmd, error ? error : "UNKNOWN_ERROR");
+                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false}",
+                 (unsigned long)seq, cmd);
     }
     sendBlePacket(payload);
 }
@@ -531,118 +531,6 @@ static void onBleSecured(uint16_t conn_handle) {
     // rtt.println("[BLE EVT] secured");
 }
 
-static bool applyTrainingTiming(const String &valueRaw) {
-    String value = valueRaw;
-    value.trim();
-    value.toUpperCase();
-
-    TrainingAlertStyle previous = trainingSubModeIndex;
-    if (value == "INSTANT") {
-        trainingSubModeIndex = TrainingAlertStyle::Instant; // Instant
-        // rtt.println("BLE CMD: POSTURE_TIMING=INSTANT");
-    } else if (value == "DELAYED") {
-        trainingSubModeIndex = TrainingAlertStyle::Delayed; // Delayed
-        // rtt.println("BLE CMD: POSTURE_TIMING=DELAYED");
-    } else if (value == "AUTOMATIC") {
-        trainingSubModeIndex = TrainingAlertStyle::Instant; // Fallback to Instant
-        // rtt.println("BLE CMD: POSTURE_TIMING=AUTOMATIC");
-    } else if (value == "NO_ALERT" || value == "NO_ALERTS" ||
-               value == "NO ALERT" || value == "NO ALERTS" ||
-               value == "TRACKING" || value == "OFF" || value == "NONE") {
-        trainingSubModeIndex = TrainingAlertStyle::NoAlerts;
-    } else {
-        return false;
-    }
-
-    if (currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
-        markSubModeChanged();
-    }
-    if (trainingSubModeIndex != previous) {
-        forceTelemetrySync = true;
-        forceLiveSync = true;
-    }
-    return true;
-}
-
-static bool applyTherapyDurationMinutes(const String &valueRaw) {
-    String value = valueRaw;
-    value.trim();
-    value.toUpperCase();
-    value.replace("MINUTES", "");
-    value.replace("MINUTE", "");
-    value.replace("MINS", "");
-    value.replace("MIN", "");
-    value.trim();
-    int mins = value.toInt();
-    if (mins <= 0) return false;
-
-    uint8_t previous = therapySubModeIndex;
-    if (mins == 10) {
-        therapySubModeIndex = 0;
-    } else if (mins == 20) {
-        therapySubModeIndex = 1;
-    } else if (mins == 30) {
-        therapySubModeIndex = 2;
-    } else {
-        return false;
-    }
-    if (therapySubModeIndex != previous) {
-        storageSaveTherapySubMode(therapySubModeIndex);
-        forceTelemetrySync = true;
-        forceLiveSync = true;
-        if (currentMode == MODE_THERAPY) {
-            therapyStop(false);
-            markSubModeChanged();
-        }
-    }
-    // rtt.printf("BLE CMD: THERAPY_DURATION_MIN=%d\n", mins);
-    return true;
-}
-
-static bool applyTrainingSubModeIndex(uint32_t index) {
-    TrainingAlertStyle previous = trainingSubModeIndex;
-    if (index == 0u) {
-        trainingSubModeIndex = TrainingAlertStyle::Instant;
-    } else if (index == 1u) {
-        trainingSubModeIndex = TrainingAlertStyle::Delayed;
-    } else if (index == 2u) {
-        trainingSubModeIndex = TrainingAlertStyle::NoAlerts;
-    } else {
-        return false;
-    }
-
-    if (currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
-        markSubModeChanged();
-    }
-    if (trainingSubModeIndex != previous) {
-        forceTelemetrySync = true;
-        forceLiveSync = true;
-    }
-    return true;
-}
-
-static bool applySubModeValue(const String &valueRaw) {
-    String value = valueRaw;
-    value.trim();
-    value.toUpperCase();
-
-    if (value == "INSTANT" || value == "DELAYED" ||
-        value == "AUTOMATIC" || value == "NO_ALERT" ||
-        value == "NO_ALERTS" || value == "NO ALERT" ||
-        value == "NO ALERTS" || value == "TRACKING" ||
-        value == "OFF" || value == "NONE") {
-        return applyTrainingTiming(value);
-    }
-
-    if (value == "10" || value == "10 MIN" || value == "10MIN" ||
-        value == "20" || value == "20 MIN" || value == "20MIN" ||
-        value == "30" || value == "30 MIN" || value == "30MIN") {
-        return applyTherapyDurationMinutes(value);
-    }
-
-    return false;
-}
-
 static bool applyMode(const String &valueRaw) {
     if (isCalibrating()) {
         // rtt.println("BLE CMD: MODE change ignored - calibration in progress");
@@ -653,30 +541,9 @@ static bool applyMode(const String &valueRaw) {
     value.trim();
     value.toUpperCase();
 
-    Mode previousMode = currentMode;
-    if (value == "TRACKING" || value == "NO_ALERT" || value == "NO_ALERTS" ||
-        value == "NO ALERT" || value == "NO ALERTS") {
+    if (value == "TRAINING" || value == "POSTURE") {
         deviceOn = true;
-        TrainingAlertStyle previous = trainingSubModeIndex;
-        trainingSubModeIndex = TrainingAlertStyle::NoAlerts; // No alerts (equivalent to tracking)
         setDeviceMode(MODE_TRAINING);
-        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
-            markSubModeChanged();
-        }
-        forceTelemetrySync = true;
-        forceLiveSync = true;
-        // rtt.println("BLE CMD: MODE=TRACKING");
-        return true;
-    } else if (value == "TRAINING" || value == "POSTURE") {
-        deviceOn = true;
-        TrainingAlertStyle previous = trainingSubModeIndex;
-        if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
-            trainingSubModeIndex = TrainingAlertStyle::Instant; // Default back to Instant if it was tracking
-        }
-        setDeviceMode(MODE_TRAINING);
-        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
-            markSubModeChanged();
-        }
         forceTelemetrySync = true;
         forceLiveSync = true;
         // RTT trace disabled here on purpose.
@@ -699,6 +566,88 @@ static bool applyMode(const String &valueRaw) {
     return false;
 }
 
+static bool parseTrainingSubMode(const String& valueRaw, TrainingAlertStyle& out) {
+    String value = valueRaw;
+    value.trim();
+    value.toUpperCase();
+
+    if (value == "INSTANT") {
+        out = TrainingAlertStyle::Instant;
+        return true;
+    }
+    if (value == "DELAYED") {
+        out = TrainingAlertStyle::Delayed;
+        return true;
+    }
+    if (value == "NO_ALERTS" || value == "NO_ALERT" ||
+        value == "NO ALERTS" || value == "NO ALERT") {
+        out = TrainingAlertStyle::NoAlerts;
+        return true;
+    }
+    return false;
+}
+
+static bool extractJsonStringField(const String& payload, const char* key, String& out);
+static bool extractJsonIntField(const String& payload, const char* key, uint32_t& out);
+
+static bool extractTrainingStartFields(const String& payload,
+                                       TrainingAlertStyle& subMode,
+                                       uint32_t& difficultyAngle,
+                                       uint32_t& delayMs,
+                                       const char*& error) {
+    String subModeRaw;
+    if (!extractJsonStringField(payload, "sub_mode", subModeRaw) &&
+        !extractJsonStringField(payload, "sub-mode", subModeRaw)) {
+        error = "BAD_REQUEST";
+        return false;
+    }
+    if (!parseTrainingSubMode(subModeRaw, subMode)) {
+        error = "BAD_SUB_MODE";
+        return false;
+    }
+
+    if (!extractJsonIntField(payload, "difficulty_angle", difficultyAngle) &&
+        !extractJsonIntField(payload, "difficulty-angle", difficultyAngle)) {
+        error = "BAD_REQUEST";
+        return false;
+    }
+    if (difficultyAngle < 5u || difficultyAngle > 60u) {
+        error = "BAD_DIFFICULTY";
+        return false;
+    }
+
+    if (!extractJsonIntField(payload, "delay_ms", delayMs) &&
+        !extractJsonIntField(payload, "delay-ms", delayMs)) {
+        error = "BAD_REQUEST";
+        return false;
+    }
+    if (delayMs < 500u || delayMs > 30000u) {
+        error = "BAD_DELAY";
+        return false;
+    }
+
+    return true;
+}
+
+static bool startTrainingFromBle(TrainingAlertStyle subMode,
+                                 uint32_t difficultyAngle,
+                                 uint32_t delayMs,
+                                 const char*& error) {
+    if (isCalibrating()) {
+        error = "CALIBRATING";
+        return false;
+    }
+
+    trainingSubModeIndex = subMode;
+    kBadPostureDeg = (float)difficultyAngle;
+    trainingDelayedAlertMs = delayMs;
+    deviceOn = true;
+    setDeviceMode(MODE_TRAINING);
+    markSubModeChanged();
+    bluetoothNotifyStateChanged();
+    return true;
+}
+
 static void stopTherapyFromBle() {
     if (currentMode == MODE_THERAPY) {
         setDeviceMode(MODE_TRAINING);
@@ -709,6 +658,19 @@ static void stopTherapyFromBle() {
     forceTelemetrySync = true;
     forceLiveSync = true;
     // logEvent("BLE", "therapy_stop");
+}
+
+static bool trainingtop() {
+    if (isCalibrating()) {
+        return false;
+    }
+
+    setDeviceMode(MODE_IDLE);
+    deviceOn = true;
+    forceTelemetrySync = true;
+    forceLiveSync = true;
+    bluetoothNotifyStateChanged();
+    return true;
 }
 
 static void applyCalibrationControl(const String &valueRaw) {
@@ -974,24 +936,6 @@ static bool extractJsonIntField(const String& payload, const char* key, uint32_t
     return true;
 }
 
-static bool extractFirstJsonStringField(const String& payload, String& out, const char* const* keys, uint8_t count) {
-    for (uint8_t i = 0; i < count; i++) {
-        if (extractJsonStringField(payload, keys[i], out)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool extractFirstJsonIntField(const String& payload, uint32_t& out, const char* const* keys, uint8_t count) {
-    for (uint8_t i = 0; i < count; i++) {
-        if (extractJsonIntField(payload, keys[i], out)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static void parseAndApplyBleCommand(const String &payloadRaw) {
     String payload = payloadRaw;
     payload.trim();
@@ -1010,97 +954,18 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             if (cmd == "GET_PROFILES") {
                 pendingProfileListSend = true;
                 ok = true;
+            } else if (cmd == "TRAINING_START") {
+                TrainingAlertStyle subMode = TrainingAlertStyle::Instant;
+                uint32_t difficultyAngle = 0u;
+                uint32_t delayMs = 0u;
+                if (extractTrainingStartFields(payload, subMode, difficultyAngle, delayMs, error)) {
+                    ok = startTrainingFromBle(subMode, difficultyAngle, delayMs, error);
+                }
             } else if (cmd == "SET_MODE") {
                 String mode;
-                static const char* const modeKeys[] = {"mode", "MODE"};
-                if (extractFirstJsonStringField(payload, mode, modeKeys, 2)) {
+                if (extractJsonStringField(payload, "mode", mode)) {
                     ok = applyMode(mode);
                     if (!ok) error = isCalibrating() ? "CALIBRATING" : "BAD_MODE";
-
-                    String timing;
-                    static const char* const timingKeys[] = {
-                        "sub_mode", "subMode", "submode", "training_submode", "trainingSubMode",
-                        "training_sub_mode", "posture_timing", "postureTiming", "timing"
-                    };
-                    if (extractFirstJsonStringField(payload, timing, timingKeys, 9)) {
-                        bool timingOk = applySubModeValue(timing);
-                        if (!timingOk) {
-                            ok = false;
-                            error = "BAD_SUB_MODE";
-                        }
-                    } else {
-                        uint32_t subModeIndex = 0u;
-                        if (extractFirstJsonIntField(payload, subModeIndex, timingKeys, 9)) {
-                            bool timingOk = (mode.equalsIgnoreCase("THERAPY"))
-                                ? applyTherapyDurationMinutes(String((subModeIndex == 0u) ? "10" : (subModeIndex == 1u) ? "20" : (subModeIndex == 2u) ? "30" : ""))
-                                : applyTrainingSubModeIndex(subModeIndex);
-                            if (!timingOk) {
-                                ok = false;
-                                error = "BAD_SUB_MODE";
-                            }
-                        }
-                    }
-                } else {
-                    error = "BAD_REQUEST";
-                }
-            } else if (cmd == "POSTURE_TIMING" || cmd == "TRAINING_SUBMODE" ||
-                       cmd == "TRAINING_SUB_MODE" || cmd == "SET_TRAINING_SUBMODE" ||
-                       cmd == "SET_TRAINING_SUB_MODE" || cmd == "SET_POSTURE_TIMING" ||
-                       cmd == "SET_SUB_MODE" || cmd == "SET_SUBMODE" ||
-                       cmd == "SUB_MODE" || cmd == "SUBMODE") {
-                String timing;
-                static const char* const timingKeys[] = {
-                    "value", "sub_mode", "subMode", "submode", "training_submode",
-                    "trainingSubMode", "training_sub_mode", "posture_timing", "postureTiming",
-                    "timing", "mode"
-                };
-                if (extractFirstJsonStringField(payload, timing, timingKeys, 11)) {
-                    ok = applySubModeValue(timing);
-                    if (!ok) error = "BAD_SUB_MODE";
-                } else {
-                    uint32_t subModeIndex = 0u;
-                    if (extractFirstJsonIntField(payload, subModeIndex, timingKeys, 11)) {
-                        ok = (currentMode == MODE_THERAPY)
-                            ? applyTherapyDurationMinutes(String((subModeIndex == 0u) ? "10" : (subModeIndex == 1u) ? "20" : (subModeIndex == 2u) ? "30" : ""))
-                            : applyTrainingSubModeIndex(subModeIndex);
-                        if (!ok) error = "BAD_SUB_MODE";
-                    } else {
-                        error = "BAD_REQUEST";
-                    }
-                }
-            } else if (cmd == "THERAPY_SUBMODE" || cmd == "THERAPY_SUB_MODE" ||
-                       cmd == "SET_THERAPY_SUBMODE" || cmd == "SET_THERAPY_SUB_MODE") {
-                String duration;
-                static const char* const durationKeys[] = {
-                    "value", "sub_mode", "subMode", "submode", "therapy_submode",
-                    "therapySubMode", "therapy_sub_mode", "duration", "minutes"
-                };
-                if (extractFirstJsonStringField(payload, duration, durationKeys, 9)) {
-                    ok = applyTherapyDurationMinutes(duration);
-                    if (!ok) error = "BAD_DURATION";
-                } else {
-                    uint32_t subModeIndex = 0u;
-                    if (extractFirstJsonIntField(payload, subModeIndex, durationKeys, 9)) {
-                        ok = applyTherapyDurationMinutes(String((subModeIndex == 0u) ? "10" : (subModeIndex == 1u) ? "20" : (subModeIndex == 2u) ? "30" : ""));
-                        if (!ok) error = "BAD_DURATION";
-                    } else {
-                        error = "BAD_REQUEST";
-                    }
-                }
-            } else if (cmd == "SET_THERAPY_DURATION" || cmd == "THERAPY_DURATION" ||
-                       cmd == "THERAPY_DURATION_MIN") {
-                uint32_t minutes = 0u;
-                if (extractJsonIntField(payload, "minutes", minutes) ||
-                    extractJsonIntField(payload, "duration_min", minutes) ||
-                    extractJsonIntField(payload, "durationMin", minutes) ||
-                    extractJsonIntField(payload, "duration", minutes) ||
-                    extractJsonIntField(payload, "therapy_duration_min", minutes) ||
-                    extractJsonIntField(payload, "therapyDurationMin", minutes) ||
-                    extractJsonIntField(payload, "value", minutes)) {
-                    char minsBuf[12];
-                    snprintf(minsBuf, sizeof(minsBuf), "%lu", (unsigned long)minutes);
-                    ok = applyTherapyDurationMinutes(String(minsBuf));
-                    if (!ok) error = "BAD_DURATION";
                 } else {
                     error = "BAD_REQUEST";
                 }
@@ -1173,6 +1038,8 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                     forceTelemetrySync = true;
                 }
                 ok = true;
+            } else if (cmd == "TRAINING_STOP") {
+                ok = trainingtop();
             } else if (cmd == "STOP_THERAPY" || cmd == "THERAPY_STOP" ||
                        cmd == "STOP THERAPY" || cmd == "STOP") {
                 stopTherapyFromBle();
@@ -1224,17 +1091,6 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 requestedMode = value;
             } else if (key == "CMD") {
                 cmdName = value;
-            } else if (key == "POSTURE_TIMING" || key == "TRAINING_SUBMODE" ||
-                       key == "TRAINING_SUB_MODE") {
-                applyTrainingTiming(value);
-            } else if (key == "SUB_MODE" || key == "SUBMODE") {
-                applySubModeValue(value);
-            } else if (key == "THERAPY_DURATION_MIN") {
-                applyTherapyDurationMinutes(value);
-            } else if (key == "THERAPY_SUBMODE" || key == "THERAPY_SUB_MODE" ||
-                       key == "THERAPY_DURATION" || key == "DURATION_MIN" ||
-                       key == "DURATION") {
-                applyTherapyDurationMinutes(value);
             } else if (key == "THERAPY_INTENSITY") {
                 applyTherapyIntensity(value);
             } else if (key == "DIFFICULTY_DEG") {

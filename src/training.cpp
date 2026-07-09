@@ -39,6 +39,7 @@ static constexpr float kLpfAlpha = 0.1f;
 static constexpr float kMotionThreshold = 2.0f;
 static constexpr float kDirectionDeg = 20.0f;
 float kBadPostureDeg = 30.0f;
+uint32_t trainingDelayedAlertMs = 5000UL;
 static constexpr float kAngleClampDeg = 90.0f;
 static constexpr float kDefaultOriginY = 6.75f;
 static constexpr float kDefaultOriginZ = 6.75f;
@@ -545,7 +546,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_badMotorStartMs = now;
   }
 
-  const unsigned long delayMs = (trainingSubModeIndex == TrainingAlertStyle::Instant) ? 200UL : 5000UL;
+  const unsigned long delayMs = (trainingSubModeIndex == TrainingAlertStyle::Instant) ? 200UL : trainingDelayedAlertMs;
   if ((now - s_badMotorStartMs) < delayMs) {
     motorSetDuty(0);
     isTrainingMotorAlertActive = false;
