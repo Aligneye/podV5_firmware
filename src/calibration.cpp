@@ -11,6 +11,8 @@
 #include <string.h>
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── State Machine Timings ───────────────────────────────────────────────────
 enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };
@@ -102,8 +104,6 @@ static void goToIdleMode() {
 }
 
 static void calibrationFail(const char* reason) {
-    calibState = CALIB_STATE_IDLE;
-    isCalibrationRunning = false;
     strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibResultSetAt = millis();
@@ -127,6 +127,9 @@ static void calibrationFail(const char* reason) {
     notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, reason);
 
     goToIdleMode();
+    calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
+    inactivityTimerHoldoffAfterCalibration();
 }
 
 static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples) {
@@ -140,8 +143,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     s_lastCalibrationValid = true;   // needed because addNextCalibrationProfile() may read this
 
     if (quality < 50) {
-        calibState = CALIB_STATE_IDLE;
-        isCalibrationRunning = false;
         strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
         lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
         calibResultSetAt = millis();
@@ -157,6 +158,9 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         motorOverrideDuty(150, 500);
 
         goToIdleMode();
+        calibState = CALIB_STATE_IDLE;
+        isCalibrationRunning = false;
+        inactivityTimerHoldoffAfterCalibration();
         return;
     }
 
@@ -172,8 +176,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     logEvent("CALIB", saveSuccess ? "after_profile_save_ok" : "after_profile_save_fail");
 
     if (!saveSuccess) {
-        calibState = CALIB_STATE_IDLE;
-        isCalibrationRunning = false;
         strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
         lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
         calibResultSetAt = millis();
@@ -189,11 +191,12 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         motorOverrideDuty(150, 500);
 
         goToIdleMode();
+        calibState = CALIB_STATE_IDLE;
+        isCalibrationRunning = false;
+        inactivityTimerHoldoffAfterCalibration();
         return;
     }
 
-    calibState = CALIB_STATE_IDLE;
-    isCalibrationRunning = false;
     strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibResultSetAt = millis();
@@ -231,6 +234,9 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     motorOverrideDuty(150, 125);
 
     goToTrainingMode();
+    calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
+    inactivityTimerHoldoffAfterCalibration();
 }
 
 static CalibrationStats calculateCalibrationStats(int sampleLimit) {

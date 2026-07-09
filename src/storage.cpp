@@ -9,6 +9,8 @@
 #include <math.h>
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 #if __has_include(<InternalFileSystem.h>)
 #include <Adafruit_LittleFS.h>

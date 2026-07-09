@@ -45,7 +45,6 @@ static char lastMode[12] = "";
 static char lastSubMode[16] = "";
 static char lastProfile[32] = "";
 static uint32_t lastProfileId = 0u;
-static uint8_t lastBatteryPercentage = 255;
 static bool lastRunning = false;
 static unsigned long connectedSinceMs = 0;
 static bool therapyPlanSentForSession = false;
@@ -101,8 +100,8 @@ static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* e
                  (unsigned long)seq, cmd);
     } else {
         snprintf(payload, sizeof(payload),
-                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
-                 (unsigned long)seq, cmd, error ? error : "UNKNOWN_ERROR");
+                 "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false}",
+                 (unsigned long)seq, cmd);
     }
     sendBlePacket(payload);
 }
@@ -221,20 +220,53 @@ static const char* currentModeText() {
     return "IDLE";
 }
 
+static void currentSubModeText(char* out, size_t outSize) {
+    if (!out || outSize == 0) {
+        return;
+    }
+
+    if (currentMode == MODE_TRAINING) {
+        if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
+            snprintf(out, outSize, "NO_ALERTS");
+        } else if (trainingSubModeIndex == TrainingAlertStyle::Instant) {
+            snprintf(out, outSize, "INSTANT");
+        } else {
+            snprintf(out, outSize, "DELAYED");
+        }
+        return;
+    }
+
+    if (currentMode == MODE_THERAPY) {
+        unsigned long minutes = 10UL;
+        if (therapySubModeIndex == 1) {
+            minutes = 20UL;
+        } else if (therapySubModeIndex == 2) {
+            minutes = 30UL;
+        }
+        snprintf(out, outSize, "%lu MIN", minutes);
+        return;
+    }
+
+    snprintf(out, outSize, "IDLE");
+}
+
 static void sendLivePacket() {
     if (!pCharacteristic || !connected) return;
     if (isCalibrating()) return;
 
     updatePostureAngle();
+    char subModeStr[16];
+    currentSubModeText(subModeStr, sizeof(subModeStr));
 
     const char* postureStr = (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
         ? "BAD POSTURE"
         : "GOOD POSTURE";
 
-    char payload[128];
+    char payload[160];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"L\",\"mode\":\"%s\",\"angle\":%.2f,\"difficulty_angle\":%.0f,\"posture\":\"%s\"}",
+             "{\"t\":\"L\",\"mode\":\"%s\",\"sub_mode\":\"%s\",\"angle\":%.2f,\"difficulty_angle\":%.0f,\"posture\":\"%s\"}",
              currentModeText(),
+             subModeStr,
              currentAngle,
              kBadPostureDeg,
              postureStr);
@@ -247,65 +279,53 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
     (void)reason;
     if (!pCharacteristic || !connected) return;
     if (isCalibrating()) return;
+    if (currentMode != MODE_TRAINING) return;
 
-    const unsigned long now = millis();
-
-    // Determine submode string
     char subModeStr[16];
-    if (currentMode == MODE_TRAINING) {
-        if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
-            strcpy(subModeStr, "INSTANT");
-        } else if (trainingSubModeIndex == TrainingAlertStyle::Instant) {
-            strcpy(subModeStr, "INSTANT");
-        } else {
-            strcpy(subModeStr, "DELAYED");
-        }
-    } else if (currentMode == MODE_THERAPY) {
-        snprintf(subModeStr, sizeof(subModeStr), "%lu MIN", therapyDuration / 60000);
-    } else {
-        strcpy(subModeStr, "INSTANT");
-    }
+    currentSubModeText(subModeStr, sizeof(subModeStr));
 
     const OrientationProfile *activeProfile = getActiveProfile();
     const uint32_t profileId = activeProfile ? activeProfile->id : 0u;
     const char *profileName = activeProfile ? activeProfile->name : "DEFAULT";
 
-    const char *modeString = currentModeText();
+    updatePostureAngle();
+    const bool badNow = (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg);
 
-    updateBatteryReading(now);
-
-    const bool runningNow = therapyIsRunning();
-
-    char telemetryBuffer[192];
+    char telemetryBuffer[256];
     snprintf(
       telemetryBuffer,
       sizeof(telemetryBuffer),
       "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
-      "\"running\":%s,"
-      "\"sid\":%lu,"
-      "\"duration\":%lu,"
-      "\"profile_id\":%lu,\"profile\":\"%s\",\"battery\":%u}",
-      modeString,
+      "\"running\":true,"
+      "\"angle\":%.2f,"
+      "\"difficulty_angle\":%.0f,"
+      "\"posture\":\"%s\","
+      "\"bad\":%s,"
+      "\"delay_ms\":%lu,"
+      "\"alert_active\":%s,"
+      "\"profile_id\":%lu,\"profile\":\"%s\"}",
+      "TRAINING",
       subModeStr,
-      runningNow ? "true" : "false",
-      (unsigned long)therapyGetSessionId(),
-      therapyGetTotalDurationSeconds(),
+      currentAngle,
+      kBadPostureDeg,
+      badNow ? "BAD POSTURE" : "GOOD POSTURE",
+      badNow ? "true" : "false",
+      (unsigned long)trainingDelayedAlertMs,
+      isTrainingMotorAlertActive ? "true" : "false",
       (unsigned long)profileId,
-      profileName,
-      (unsigned)batteryPercentage
+      profileName
     );
     sendBlePacket(telemetryBuffer);
 
     // Update state caches
-    strncpy(lastMode, modeString, sizeof(lastMode) - 1);
+    strncpy(lastMode, "TRAINING", sizeof(lastMode) - 1);
     lastMode[sizeof(lastMode) - 1] = '\0';
     strncpy(lastSubMode, subModeStr, sizeof(lastSubMode) - 1);
     lastSubMode[sizeof(lastSubMode) - 1] = '\0';
     strncpy(lastProfile, profileName, sizeof(lastProfile) - 1);
     lastProfile[sizeof(lastProfile) - 1] = '\0';
     lastProfileId = profileId;
-    lastBatteryPercentage = batteryPercentage;
-    lastRunning = runningNow;
+    lastRunning = false;
     telemetryCacheValid = true;
 }
 
@@ -511,91 +531,121 @@ static void onBleSecured(uint16_t conn_handle) {
     // rtt.println("[BLE EVT] secured");
 }
 
-static void applyTrainingTiming(const String &valueRaw) {
-    String value = valueRaw;
-    value.trim();
-    value.toUpperCase();
-
-    TrainingAlertStyle previous = trainingSubModeIndex;
-    if (value == "INSTANT") {
-        trainingSubModeIndex = TrainingAlertStyle::Instant; // Instant
-        // rtt.println("BLE CMD: POSTURE_TIMING=INSTANT");
-    } else if (value == "DELAYED") {
-        trainingSubModeIndex = TrainingAlertStyle::Delayed; // Delayed
-        // rtt.println("BLE CMD: POSTURE_TIMING=DELAYED");
-    } else if (value == "AUTOMATIC") {
-        trainingSubModeIndex = TrainingAlertStyle::Instant; // Fallback to Instant
-        // rtt.println("BLE CMD: POSTURE_TIMING=AUTOMATIC");
-    }
-
-    if (currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
-        markSubModeChanged();
-    }
-}
-
-static void applyTherapyDurationMinutes(const String &valueRaw) {
-    String value = valueRaw;
-    value.trim();
-    int mins = value.toInt();
-    if (mins <= 0) return;
-
-    uint8_t previous = therapySubModeIndex;
-    if (mins == 10) {
-        therapySubModeIndex = 0;
-    } else if (mins == 20) {
-        therapySubModeIndex = 1;
-    } else if (mins == 30) {
-        therapySubModeIndex = 2;
-    } else {
-        therapySubModeIndex = 0; // default 10 min
-    }
-    if (therapySubModeIndex != previous) {
-        if (currentMode == MODE_THERAPY) {
-            therapyStop(false);
-            markSubModeChanged();
-        }
-    }
-    // rtt.printf("BLE CMD: THERAPY_DURATION_MIN=%d\n", mins);
-}
-
-static void applyMode(const String &valueRaw) {
+static bool applyMode(const String &valueRaw) {
     if (isCalibrating()) {
         // rtt.println("BLE CMD: MODE change ignored - calibration in progress");
-        return;
+        return false;
     }
 
     String value = valueRaw;
     value.trim();
     value.toUpperCase();
 
-    Mode previousMode = currentMode;
-    if (value == "TRACKING") {
+    if (value == "TRAINING" || value == "POSTURE") {
         deviceOn = true;
-        TrainingAlertStyle previous = trainingSubModeIndex;
-        trainingSubModeIndex = TrainingAlertStyle::NoAlerts; // No alerts (equivalent to tracking)
         setDeviceMode(MODE_TRAINING);
-        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
-            markSubModeChanged();
-        }
-        // rtt.println("BLE CMD: MODE=TRACKING");
-    } else if (value == "TRAINING" || value == "POSTURE") {
-        deviceOn = true;
-        TrainingAlertStyle previous = trainingSubModeIndex;
-        if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
-            trainingSubModeIndex = TrainingAlertStyle::Instant; // Default back to Instant if it was tracking
-        }
-        setDeviceMode(MODE_TRAINING);
-        if (previousMode == MODE_TRAINING && currentMode == MODE_TRAINING && trainingSubModeIndex != previous) {
-            markSubModeChanged();
-        }
+        forceTelemetrySync = true;
+        forceLiveSync = true;
         // RTT trace disabled here on purpose.
         // Uncomment if you want bluetooth.cpp to emit BLE state changes to RTT.
         // logEvent("BLE", "mode_training");
+        return true;
     } else if (value == "THERAPY") {
         deviceOn = true;
         setDeviceMode(MODE_THERAPY);
+        forceTelemetrySync = true;
+        forceLiveSync = true;
         // logEvent("BLE", "mode_therapy");
+        return true;
+    } else if (value == "IDLE" || value == "OFF") {
+        setDeviceMode(MODE_IDLE);
+        forceTelemetrySync = true;
+        forceLiveSync = true;
+        return true;
     }
+    return false;
+}
+
+static bool parseTrainingSubMode(const String& valueRaw, TrainingAlertStyle& out) {
+    String value = valueRaw;
+    value.trim();
+    value.toUpperCase();
+
+    if (value == "INSTANT") {
+        out = TrainingAlertStyle::Instant;
+        return true;
+    }
+    if (value == "DELAYED") {
+        out = TrainingAlertStyle::Delayed;
+        return true;
+    }
+    if (value == "NO_ALERTS" || value == "NO_ALERT" ||
+        value == "NO ALERTS" || value == "NO ALERT") {
+        out = TrainingAlertStyle::NoAlerts;
+        return true;
+    }
+    return false;
+}
+
+static bool extractJsonStringField(const String& payload, const char* key, String& out);
+static bool extractJsonIntField(const String& payload, const char* key, uint32_t& out);
+
+static bool extractTrainingStartFields(const String& payload,
+                                       TrainingAlertStyle& subMode,
+                                       uint32_t& difficultyAngle,
+                                       uint32_t& delayMs,
+                                       const char*& error) {
+    String subModeRaw;
+    if (!extractJsonStringField(payload, "sub_mode", subModeRaw) &&
+        !extractJsonStringField(payload, "sub-mode", subModeRaw)) {
+        error = "BAD_REQUEST";
+        return false;
+    }
+    if (!parseTrainingSubMode(subModeRaw, subMode)) {
+        error = "BAD_SUB_MODE";
+        return false;
+    }
+
+    if (!extractJsonIntField(payload, "difficulty_angle", difficultyAngle) &&
+        !extractJsonIntField(payload, "difficulty-angle", difficultyAngle)) {
+        error = "BAD_REQUEST";
+        return false;
+    }
+    if (difficultyAngle < 5u || difficultyAngle > 60u) {
+        error = "BAD_DIFFICULTY";
+        return false;
+    }
+
+    if (!extractJsonIntField(payload, "delay_ms", delayMs) &&
+        !extractJsonIntField(payload, "delay-ms", delayMs)) {
+        error = "BAD_REQUEST";
+        return false;
+    }
+    if (delayMs < 500u || delayMs > 30000u) {
+        error = "BAD_DELAY";
+        return false;
+    }
+
+    return true;
+}
+
+static bool startTrainingFromBle(TrainingAlertStyle subMode,
+                                 uint32_t difficultyAngle,
+                                 uint32_t delayMs,
+                                 const char*& error) {
+    if (isCalibrating()) {
+        error = "CALIBRATING";
+        return false;
+    }
+
+    trainingSubModeIndex = subMode;
+    kBadPostureDeg = (float)difficultyAngle;
+    trainingDelayedAlertMs = delayMs;
+    deviceOn = true;
+    setDeviceMode(MODE_TRAINING);
+    markSubModeChanged();
+    bluetoothNotifyStateChanged();
+    return true;
 }
 
 static void stopTherapyFromBle() {
@@ -608,6 +658,19 @@ static void stopTherapyFromBle() {
     forceTelemetrySync = true;
     forceLiveSync = true;
     // logEvent("BLE", "therapy_stop");
+}
+
+static bool trainingtop() {
+    if (isCalibrating()) {
+        return false;
+    }
+
+    setDeviceMode(MODE_IDLE);
+    deviceOn = true;
+    forceTelemetrySync = true;
+    forceLiveSync = true;
+    bluetoothNotifyStateChanged();
+    return true;
 }
 
 static void applyCalibrationControl(const String &valueRaw) {
@@ -891,6 +954,21 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             if (cmd == "GET_PROFILES") {
                 pendingProfileListSend = true;
                 ok = true;
+            } else if (cmd == "TRAINING_START") {
+                TrainingAlertStyle subMode = TrainingAlertStyle::Instant;
+                uint32_t difficultyAngle = 0u;
+                uint32_t delayMs = 0u;
+                if (extractTrainingStartFields(payload, subMode, difficultyAngle, delayMs, error)) {
+                    ok = startTrainingFromBle(subMode, difficultyAngle, delayMs, error);
+                }
+            } else if (cmd == "SET_MODE") {
+                String mode;
+                if (extractJsonStringField(payload, "mode", mode)) {
+                    ok = applyMode(mode);
+                    if (!ok) error = isCalibrating() ? "CALIBRATING" : "BAD_MODE";
+                } else {
+                    error = "BAD_REQUEST";
+                }
             } else if (cmd == "CALIBRATE_CANCEL") {
                 requestCalibrationCancel();
                 ok = true;
@@ -960,6 +1038,8 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                     forceTelemetrySync = true;
                 }
                 ok = true;
+            } else if (cmd == "TRAINING_STOP") {
+                ok = trainingtop();
             } else if (cmd == "STOP_THERAPY" || cmd == "THERAPY_STOP" ||
                        cmd == "STOP THERAPY" || cmd == "STOP") {
                 stopTherapyFromBle();
@@ -1011,10 +1091,6 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 requestedMode = value;
             } else if (key == "CMD") {
                 cmdName = value;
-            } else if (key == "POSTURE_TIMING") {
-                applyTrainingTiming(value);
-            } else if (key == "THERAPY_DURATION_MIN") {
-                applyTherapyDurationMinutes(value);
             } else if (key == "THERAPY_INTENSITY") {
                 applyTherapyIntensity(value);
             } else if (key == "DIFFICULTY_DEG") {
@@ -1119,9 +1195,7 @@ static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, 
         payload += (char)data[i];
     }
 
-#if ALIGN_RTT_BLE_RX_LOG
     rttDebuggerPrintBlePacket("RX", payload.c_str());
-#endif
     parseAndApplyBleCommand(payload);
 }
 
@@ -1204,19 +1278,7 @@ void bluetoothLoop() {
 
     // Check if telemetry state changed to set forceTelemetrySync
     char subModeStr[16];
-    if (currentMode == MODE_TRAINING) {
-        if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
-            strcpy(subModeStr, "INSTANT");
-        } else if (trainingSubModeIndex == TrainingAlertStyle::Instant) {
-            strcpy(subModeStr, "INSTANT");
-        } else {
-            strcpy(subModeStr, "DELAYED");
-        }
-    } else if (currentMode == MODE_THERAPY) {
-        snprintf(subModeStr, sizeof(subModeStr), "%lu MIN", therapyDuration / 60000);
-    } else {
-        strcpy(subModeStr, "INSTANT");
-    }
+    currentSubModeText(subModeStr, sizeof(subModeStr));
 
     const OrientationProfile *activeProfile = getActiveProfile();
     const uint32_t profileId = activeProfile ? activeProfile->id : 0u;
@@ -1233,7 +1295,6 @@ void bluetoothLoop() {
         strcmp(lastSubMode, subModeStr) != 0 ||
         strcmp(lastProfile, profileName) != 0 ||
         lastProfileId != profileId ||
-        lastBatteryPercentage != batteryPercentage ||
         lastRunning != runningNow;
 
     if (telemetryChanged) {
@@ -1267,12 +1328,11 @@ void bluetoothLoop() {
                 sendLivePacket();
             }
 
-            // 2. T: Send training/status telemetry every 1000 ms in TRAINING mode, or on force sync
-            if ((currentMode == MODE_TRAINING &&
-                 (forceTelemetrySync ||
-                  lastTrainingTelemetrySendMs == 0 ||
-                  ((now - lastTrainingTelemetrySendMs) >= TRAINING_TELEMETRY_INTERVAL_MS))) ||
-                (forceTelemetrySync && currentMode != MODE_TRAINING)) {
+            // 2. T: Send pure training telemetry every 1000 ms in TRAINING mode, or on force sync
+            if (currentMode == MODE_TRAINING &&
+                (forceTelemetrySync ||
+                 lastTrainingTelemetrySendMs == 0 ||
+                 ((now - lastTrainingTelemetrySendMs) >= TRAINING_TELEMETRY_INTERVAL_MS))) {
                 forceTelemetrySync = false;
                 lastTrainingTelemetrySendMs = now;
                 sendStatusTelemetry("loop", "training_1s");
@@ -1452,6 +1512,15 @@ void bluetoothRequestCalibrationStart() {
 void bluetoothRequestBatteryStatusBlink() {
     batteryBlinkActive = true;
     batteryBlinkStartMs = 0UL;
+}
+
+void bluetoothNotifyStateChanged() {
+    forceTelemetrySync = true;
+    forceLiveSync = true;
+    telemetryCacheValid = false;
+    lastLiveSendMs = 0;
+    lastTrainingTelemetrySendMs = 0;
+    lastTherapyLiveSendMs = 0;
 }
 
 void notifyNewSessionStored() {

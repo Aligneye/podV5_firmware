@@ -18,6 +18,8 @@
 #endif
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── Name arrays ────────────────────────────────────────────────────────────
 const char *modeNames[] = {"Training Mode", "Therapy Mode", "Idle Mode", "DFU Mode"};
@@ -47,6 +49,7 @@ static void playButtonPressHaptic() {
 void markSubModeChanged() {
   lastModeChangeMs = millis();
   lastModeChangeDelayMs = SUBMODE_SWITCH_DELAY_MS;
+  bluetoothNotifyStateChanged();
 }
 
 void setDeviceMode(Mode newMode) {
@@ -84,6 +87,7 @@ void setDeviceMode(Mode newMode) {
       bluetoothRequestBatteryStatusBlink();
     }
   }
+  bluetoothNotifyStateChanged();
 }
 
 static void handleSingleClick() {
@@ -122,6 +126,7 @@ static void handleDoubleClick() {
     // Stop session but stay in Therapy mode, then apply new duration
     therapyStop(false);
     therapySubModeIndex = (therapySubModeIndex + 1) % THERAPY_SUBMODE_COUNT;
+    storageSaveTherapySubMode(therapySubModeIndex);
     markSubModeChanged();
 
     DEBUG_PRINT("Therapy Sub-Mode changed: ");

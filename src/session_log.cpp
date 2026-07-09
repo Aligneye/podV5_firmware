@@ -1,8 +1,11 @@
 #include "session_log.h"
+#include "rtt_debugger.h"
 #include <string.h>
 #include <RTTStream.h>
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 #if __has_include(<InternalFileSystem.h>)
 #include <Adafruit_LittleFS.h>

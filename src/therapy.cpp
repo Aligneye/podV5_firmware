@@ -5,9 +5,12 @@
 #include "sleep.h"
 #include "motor.h"
 #include "session_stats.h"
+#include "rtt_debugger.h"
 #include <math.h>
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 static const char* PATTERN_NAMES[] = {
     "Muscle Act",  "Rev Ramp",     "Ramp",       "Wave",         "Slow Wave",
