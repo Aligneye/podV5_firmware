@@ -255,18 +255,14 @@ static void sendLivePacket() {
     if (isCalibrating()) return;
 
     updatePostureAngle();
-    char subModeStr[16];
-    currentSubModeText(subModeStr, sizeof(subModeStr));
-
     const char* postureStr = (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg)
         ? "BAD POSTURE"
         : "GOOD POSTURE";
 
     char payload[160];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"L\",\"mode\":\"%s\",\"sub_mode\":\"%s\",\"angle\":%.2f,\"difficulty_angle\":%.0f,\"posture\":\"%s\"}",
+             "{\"t\":\"L\",\"mode\":\"%s\",\"angle\":%.2f,\"difficulty_angle\":%.0f,\"posture\":\"%s\"}",
              currentModeText(),
-             subModeStr,
              currentAngle,
              kBadPostureDeg,
              postureStr);
@@ -296,11 +292,9 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
       telemetryBuffer,
       sizeof(telemetryBuffer),
       "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
-      "\"running\":true,"
       "\"angle\":%.2f,"
       "\"difficulty_angle\":%.0f,"
       "\"posture\":\"%s\","
-      "\"bad\":%s,"
       "\"delay_ms\":%lu,"
       "\"alert_active\":%s,"
       "\"profile_id\":%lu,\"profile\":\"%s\"}",
@@ -309,7 +303,6 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
       currentAngle,
       kBadPostureDeg,
       badNow ? "BAD POSTURE" : "GOOD POSTURE",
-      badNow ? "true" : "false",
       (unsigned long)trainingDelayedAlertMs,
       isTrainingMotorAlertActive ? "true" : "false",
       (unsigned long)profileId,
