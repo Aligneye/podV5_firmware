@@ -28,14 +28,14 @@ const char *therapySubModes[] = {"10 min", "20 min", "30 min"};
 
 // ── State definitions ──────────────────────────────────────────────────────
 bool deviceOn = true;
-Mode currentMode = MODE_TRAINING;
+Mode currentMode = MODE_IDLE;
 TrainingAlertStyle trainingSubModeIndex = TrainingAlertStyle::Instant;
 uint8_t therapySubModeIndex = 0;
 unsigned long lastModeChangeMs = 0;
 unsigned long lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
-static bool idlePrinted = true;
-static bool trainingStarted = true;
+static bool idlePrinted = false;
+static bool trainingStarted = false;
 
 // OneButton instance: active LOW, internal pull-up enabled
 static OneButton btn(PIN_BUTTON, true, true);
@@ -198,9 +198,9 @@ void buttonSetup() {
   therapySubModeIndex = storageLoadTherapySubMode();
 
   DEBUG_PRINTLN("Device ON");
-  currentMode = MODE_TRAINING;
+  currentMode = MODE_IDLE;
   trainingStarted = false;
-  idlePrinted = true;
+  idlePrinted = false;
 }
 
 void buttonLoop() {
