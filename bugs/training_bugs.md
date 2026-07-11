@@ -6,16 +6,16 @@ Reviewed `src/training.cpp`, `include/training.h`, the training lifecycle in `sr
 
 ## Summary
 
-- Confirmed bugs: **5** (**4 High**, **1 Medium**)
+- Confirmed bugs: **5** (**1 Critical**, **3 High**, **1 Medium**)
 - Risks: **2 Low**
 - Implementation note: **1**
-- Build status: the unmodified firmware builds successfully for `nrf52832_custom`.
+- Fixed: **1** (step_count references removed)
 
 ## Confirmed bugs
 
-### 1. [High] Returning to training can skip `trainingStart()` and leave session tracking stopped
+### 1. [Critical] Returning to training can skip `trainingStart()` and leave session tracking stopped
 
-- **Source:** `src/training.cpp:208`, `src/training.cpp:667-670`, `src/training.cpp:676-679`, `src/button.cpp:55-64`, `src/main.cpp:53-55`, `src/calibration.cpp:493-496`, `src/calibration.cpp:239`
+- **Source:** `src/training.cpp:208`, `src/training.cpp:667-670`, `src/training.cpp:676-679`, `src/button.cpp:55-64`, `src/main.cpp:53-55`, `src/calibration.cpp:239`
 - **Evidence / trigger:** `trainingLoop()` records entry using its file-local `s_lastModeForSession`. Leaving training calls `trainingStop()` directly from `setDeviceMode()`, but it cannot update that file-local marker. When the new mode is `MODE_IDLE`, `main.cpp` returns before `trainingLoop()`, so the marker remains `MODE_TRAINING`. A subsequent IDLE -> TRAINING transition therefore fails the condition at `training.cpp:667` and skips both `wakePostureSensor()` and `trainingStart()`. A common instance is calibration started while training: calibration forces IDLE, then success returns to TRAINING.
 - **Impact:** Posture calculations resume, but `onTrainingStarted()` is not called. The new training period is not tracked or promoted/saved as a session, displayed session data can remain inactive/stale, and the one-second motor grace period is not restarted. A later non-training loop can also call `trainingStop()` a second time.
 - **Suggested fix:** Give lifecycle ownership to one place. For example, update the mode marker whenever `trainingStart()`/`trainingStop()` is called, or remove direct lifecycle calls from `setDeviceMode()` and ensure the transition loop runs in IDLE. Add a regression test for TRAINING -> IDLE -> TRAINING and TRAINING -> CALIBRATION -> TRAINING.
@@ -29,8 +29,8 @@ Reviewed `src/training.cpp`, `include/training.h`, the training lifecycle in `sr
 
 ### 3. [High] The advertised five-second sensor retry is unreachable during an ongoing failed session
 
-- **Source:** `src/training.cpp:126-135`, `src/training.cpp:397-402`, `src/training.cpp:572-575`, `src/training.cpp:681-683`, `src/calibration.cpp:498-507`
-- **Evidence / trigger:** The retry logic is inside `trainingIngestAccelSample()`'s `!sensorInitialized` branch. Normal posture sampling returns before calling it when the flag is false (`training.cpp:397-399`), and the non-training path calls it only when the flag is true (`training.cpp:681-683`). Calibration refuses to start before calling `wakePostureSensor()`. Consequently, after a disconnect sets the flag false, an ongoing training session never reaches the retry branch; only a later mode/wake transition can call `initPostureSensor()` separately.
+- **Source:** `src/training.cpp:126-135`, `src/training.cpp:397-402`, `src/training.cpp:572-575`, `src/training.cpp:681-683`
+- **Evidence / trigger:** The retry logic is inside `trainingIngestAccelSample()`'s `!sensorInitialized` branch. Normal posture sampling returns before calling it when the flag is false (`training.cpp:397-399`), and the non-training path calls it only when the flag is true (`training.cpp:681-683`). Consequently, after a disconnect sets the flag false, an ongoing training session never reaches the retry branch; only a later mode/wake transition can call `initPostureSensor()` separately.
 - **Impact:** A transient I2C/sensor fault permanently disables posture and step updates for the current session, despite the log message and code claiming periodic recovery.
 - **Suggested fix:** Call the ingestion/recovery routine without the outer `sensorInitialized` guards, or move retry scheduling into a routine that is always serviced. Reinitialize alert/filter state only after a verified successful read.
 
@@ -54,7 +54,7 @@ Reviewed `src/training.cpp`, `include/training.h`, the training lifecycle in `sr
 
 - **Source:** `src/training.cpp:149-161`
 - **Evidence / trigger:** Exactly zero acceleration on all axes is possible during free fall, but the code treats that value as proof of connection loss and tears down sensor/filter state.
-- **Impact:** A drop can turn a temporary physical condition into a latched sensor outage (and then encounters confirmed bugs 2 and 3).
+- **Impact:** A drop can turn a temporary physical condition into a latched sensor outage (and then encounters confirmed bugs 3 and 4).
 - **Suggested fix:** Check the I2C transaction/register status, require repeated invalid reads, or perform a device-ID probe before declaring the sensor disconnected.
 
 ### R2. [Low risk] The calibration sampling API reports initialization, not whether it obtained a fresh sample

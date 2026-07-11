@@ -46,9 +46,7 @@ Audited `src/button.cpp`, `include/button.h`, OneButton callback flow, mode tran
 
 ## Contract mismatch / validation required
 
-### BTN-R01 — DFU is bound to double-click while the repository contract says triple-click
+### BTN-R01 — [RESOLVED] DFU gesture documentation corrected
 
 - **Locations:** `src/button.cpp:105-149`, `src/button.cpp:151-171`; `CLAUDE.md:33`
-- **Observed behavior:** In IDLE, a double-click enters OTA DFU. A triple-click instead clears/unlocks BLE pairing. The repository architecture description says triple-click enters DFU.
-- **Risk:** If the written interaction contract is authoritative, an ordinary double-click can unexpectedly reboot into the bootloader and the documented recovery gesture does something different.
-- **Suggested validation:** Decide which gesture is the product contract, then align code, mobile instructions, and documentation. Treat entry to DFU as a deliberately hard-to-trigger action.
+- **Resolution:** CLAUDE.md has been updated to match the code. Double-click in IDLE enters OTA DFU. Triple-click in IDLE unlocks BLE pairing. The code is authoritative.
