@@ -18,8 +18,6 @@
 #endif
 
 extern RTTStream rtt;
-static AlignRttSilencer s_nonBleRtt;
-#define rtt s_nonBleRtt
 
 // ── Name arrays ────────────────────────────────────────────────────────────
 const char *modeNames[] = {"Training Mode", "Therapy Mode", "Idle Mode", "DFU Mode"};
@@ -41,6 +39,7 @@ static bool trainingStarted = false;
 static OneButton btn(PIN_BUTTON, true, true);
 
 static void playButtonPressHaptic() {
+  DEBUG_PRINTLN("Button press");
   if (calibrationMotorActive())
     return;
   motorOverrideDuty(130, 70);
@@ -58,6 +57,10 @@ void setDeviceMode(Mode newMode) {
   }
 
   Mode previousMode = currentMode;
+  DEBUG_PRINT("setDeviceMode: ");
+  DEBUG_PRINT(modeNames[previousMode]);
+  DEBUG_PRINT(" -> ");
+  DEBUG_PRINTLN(modeNames[newMode]);
 
   // 1. Stop active tasks in the PREVIOUS mode immediately
   if (currentMode == MODE_TRAINING) {
@@ -91,6 +94,7 @@ void setDeviceMode(Mode newMode) {
 }
 
 static void handleSingleClick() {
+  DEBUG_PRINTLN("Single click");
   if (isCalibrating()) {
     DEBUG_PRINTLN("Button click detected during calibration - canceling");
     calibrationRequestCancel();
@@ -99,6 +103,8 @@ static void handleSingleClick() {
 
   // Cycle modes: Training -> Therapy -> Off -> Training
   Mode nextMode = (Mode)((currentMode + 1) % MODE_COUNT);
+  DEBUG_PRINT("Cycling mode to: ");
+  DEBUG_PRINTLN(modeNames[nextMode]);
   setDeviceMode(nextMode);
 }
 

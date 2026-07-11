@@ -274,6 +274,13 @@ void therapySetup() {
     isTherapyRunning = false;
 }
 
+void therapyEnsurePatternsInitialized() {
+    if (!patternsInitialized) {
+        therapyDurationMs = durationForSubMode(therapySubModeIndex);
+        initializePatternSequence();
+    }
+}
+
 void therapyStart() {
     therapySessionId++;
     if (therapySessionId == 0) {
@@ -433,7 +440,6 @@ uint8_t therapyGetTotalPatternCount() {
 }
 
 uint32_t therapyGetSessionId() {
-    if (!therapyIsRunning()) return 0;
     return therapySessionId;
 }
 
