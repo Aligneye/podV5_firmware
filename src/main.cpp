@@ -10,8 +10,9 @@
 #include "bluetooth.h"
 #include "device_time.h"
 #include "motor.h"
+#include "sleep.h"
 #include "session_stats.h"
-#include "monitor_log.h"
+#include "rtt_debugger.h"
 
 RTTStream rtt;
 
@@ -39,6 +40,7 @@ void setup() {
     calibrationSetup();
     bluetoothSetup();
     initDeviceTime();
+    inactivityTimerSetup();
 }
 
 void loop() {
@@ -46,6 +48,8 @@ void loop() {
     motorUpdate();
     bluetoothLoop();
     calibrationLoop();
+    inactivityTimerLoop();
+    rttDebuggerLoop();
     if (currentMode == MODE_IDLE || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
         return;
     }
@@ -53,6 +57,7 @@ void loop() {
     // Training first: posture motor is authoritative unless calibration idle-handler
     // applies short success/fail buzz afterward (see calibration.cpp).
     trainingLoop();
+    inactivityTimerLoop();
     maintainDeviceTime();
     updateSessionStats();
     maintainSessionStats();

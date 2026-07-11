@@ -1,16 +1,17 @@
 #include "training.h"
 #include "button.h"
 #include "calibration.h"
+#include "sleep.h"
 #include "motor.h"
 #include "session_stats.h"
 #include "step_count.h"
 #include "storage.h"
+#include "rtt_debugger.h"
 #include <Adafruit_LIS3DH.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include <math.h>
 #include <string.h>
-#include "monitor_log.h"
 
 /**
 Ye code different modules ko connect kar raha hai.
@@ -30,12 +31,15 @@ Matlab ye file posture training ka brain hai.
 */
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── Spec constants ─────────────────────────────────────────────────────────
 static constexpr float kLpfAlpha = 0.1f;
 static constexpr float kMotionThreshold = 2.0f;
 static constexpr float kDirectionDeg = 20.0f;
 float kBadPostureDeg = 30.0f;
+uint32_t trainingDelayedAlertMs = 5000UL;
 static constexpr float kAngleClampDeg = 90.0f;
 static constexpr float kDefaultOriginY = 6.75f;
 static constexpr float kDefaultOriginZ = 6.75f;
@@ -213,6 +217,7 @@ static bool s_vibOn = false;
 /** Motor uses same rule as ESP32 isBadPosture (forward > 25° + debounce). */
 static bool s_forwardMotorBad = false;
 static unsigned long s_trainingStartMs = 0;
+bool isTrainingMotorAlertActive = false;
 
 static void loadStoredCalibration() {
   float loadedY = kDefaultOriginY;
@@ -503,6 +508,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   if (calibrationMotorActive()) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -512,6 +518,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
     s_vibToggleMs = 0;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -522,6 +529,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
     motorSetDuty(0);
     s_badMotorStartMs = 0;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -530,6 +538,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_badMotorStartMs = 0;
     s_vibOn = false;
     s_vibToggleMs = 0;
+    isTrainingMotorAlertActive = false;
     return;
   }
 
@@ -537,12 +546,15 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_badMotorStartMs = now;
   }
 
-  const unsigned long delayMs = (trainingSubModeIndex == TrainingAlertStyle::Instant) ? 200UL : 5000UL;
+  const unsigned long delayMs = (trainingSubModeIndex == TrainingAlertStyle::Instant) ? 200UL : trainingDelayedAlertMs;
   if ((now - s_badMotorStartMs) < delayMs) {
     motorSetDuty(0);
+    isTrainingMotorAlertActive = false;
     return;
   }
 
+  isTrainingMotorAlertActive = true;
+  inactivityTimerReset();
   const unsigned long vibInterval = 500UL;
   if ((now - s_vibToggleMs) >= vibInterval) {
     s_vibToggleMs = now;
@@ -572,15 +584,18 @@ uint32_t getDeviceStepCount() { return stepCountGetTotal(); }
 void trainingStart() {
   rtt.println("Training: start");
   s_trainingStartMs = millis();
+  isTrainingMotorAlertActive = false;
   onTrainingStarted();
 }
 
 void trainingStop() {
-  motorSetDuty(0);
   s_badMotorStartMs = 0;
   s_vibOn = false;
   s_vibToggleMs = 0;
   s_forwardMotorBad = false;
+  isTrainingMotorAlertActive = false;
+  motorSetDuty(0);
+  motorUpdate();
   rtt.println("Training: stop");
   onTrainingEnded();
 }

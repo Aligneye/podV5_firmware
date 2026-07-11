@@ -6,7 +6,7 @@ set "OPENOCD_SCRIPTS=%USERPROFILE%\.platformio\packages\tool-openocd\openocd\scr
 set "PIO=%USERPROFILE%\.platformio\penv\Scripts\pio.exe"
 
 echo =========================================
-echo AlignEye Pod RTT Monitor
+echo AlignEye Pod RTT Debugger
 echo =========================================
 
 if not exist "%OPENOCD%" (
@@ -53,7 +53,7 @@ start /b "OpenOCD RTT Server" "%OPENOCD%" ^
 echo [RTT] Waiting for RTT server to initialize...
 timeout /t 3 /nobreak >nul
 
-echo [RTT] Starting monitor...
+echo [RTT] Starting debugger...
 "%PIO%" device monitor --port socket://localhost:9090 --baud 115200
 
 endlocal

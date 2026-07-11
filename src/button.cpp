@@ -7,7 +7,7 @@
 #include "device_time.h"
 #include "training.h"
 #include <OneButton.h>
-#include "monitor_log.h"
+#include "rtt_debugger.h"
 
 #ifdef DEBUG_LOGGING
 #define DEBUG_PRINT(x) rtt.print(x)
@@ -18,6 +18,8 @@
 #endif
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── Name arrays ────────────────────────────────────────────────────────────
 const char *modeNames[] = {"Training Mode", "Therapy Mode", "Idle Mode", "DFU Mode"};
@@ -26,14 +28,14 @@ const char *therapySubModes[] = {"10 min", "20 min", "30 min"};
 
 // ── State definitions ──────────────────────────────────────────────────────
 bool deviceOn = true;
-Mode currentMode = MODE_TRAINING;
+Mode currentMode = MODE_IDLE;
 TrainingAlertStyle trainingSubModeIndex = TrainingAlertStyle::Instant;
 uint8_t therapySubModeIndex = 0;
 unsigned long lastModeChangeMs = 0;
 unsigned long lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
-static bool idlePrinted = true;
-static bool trainingStarted = true;
+static bool idlePrinted = false;
+static bool trainingStarted = false;
 
 // OneButton instance: active LOW, internal pull-up enabled
 static OneButton btn(PIN_BUTTON, true, true);
@@ -47,6 +49,7 @@ static void playButtonPressHaptic() {
 void markSubModeChanged() {
   lastModeChangeMs = millis();
   lastModeChangeDelayMs = SUBMODE_SWITCH_DELAY_MS;
+  bluetoothNotifyStateChanged();
 }
 
 void setDeviceMode(Mode newMode) {
@@ -84,6 +87,7 @@ void setDeviceMode(Mode newMode) {
       bluetoothRequestBatteryStatusBlink();
     }
   }
+  bluetoothNotifyStateChanged();
 }
 
 static void handleSingleClick() {
@@ -122,6 +126,7 @@ static void handleDoubleClick() {
     // Stop session but stay in Therapy mode, then apply new duration
     therapyStop(false);
     therapySubModeIndex = (therapySubModeIndex + 1) % THERAPY_SUBMODE_COUNT;
+    storageSaveTherapySubMode(therapySubModeIndex);
     markSubModeChanged();
 
     DEBUG_PRINT("Therapy Sub-Mode changed: ");
@@ -173,6 +178,7 @@ static void handleHold() {
     return;
   }
 
+  setDeviceMode(MODE_IDLE);
   calibrationRequestStart();
 }
 
@@ -192,9 +198,9 @@ void buttonSetup() {
   therapySubModeIndex = storageLoadTherapySubMode();
 
   DEBUG_PRINTLN("Device ON");
-  currentMode = MODE_TRAINING;
+  currentMode = MODE_IDLE;
   trainingStarted = false;
-  idlePrinted = true;
+  idlePrinted = false;
 }
 
 void buttonLoop() {

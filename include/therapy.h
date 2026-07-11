@@ -24,6 +24,7 @@ enum TrainingSubMode : uint8_t {
 extern TrainingDelay currentTrainingDelay;
 extern unsigned long therapyDuration;
 extern int currentPatternIndex;
+extern bool isTherapyRunning;
 
 void therapySetup();
 void therapyLoop();

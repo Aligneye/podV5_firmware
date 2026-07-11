@@ -23,6 +23,7 @@ void trainingGetFilteredAccel(float* outY, float* outZ);
 void sleepPostureSensor();
 void wakePostureSensor();
 bool isDeviceMoving();
+extern bool isTrainingMotorAlertActive;
 
 bool     isTrainingSessionActive();
 uint32_t getTrainingSessionNumber();
@@ -36,6 +37,7 @@ extern float currentAngle;
 extern bool  isBadPosture;
 extern bool  sensorInitialized;
 extern float kBadPostureDeg;
+extern uint32_t trainingDelayedAlertMs;
 extern bool  s_bootProfileDetectionDone;
 
 /** Short text for RTT / BLE (no Arduino String). */

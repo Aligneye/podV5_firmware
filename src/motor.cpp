@@ -1,6 +1,10 @@
 #include "motor.h"
 #include "config.h"
 #include "button.h"
+#include "calibration.h"
+#include "sleep.h"
+#include "therapy.h"
+#include "training.h"
 
 extern int therapyIntensityLevel;
 
@@ -11,8 +15,18 @@ static volatile uint32_t g_overrideUntilMs = 0;
 static volatile uint32_t g_calmStartMs = 0;
 static volatile uint16_t g_calmDurationMs = 0;
 static volatile bool g_motorActive = false;
+bool motorActive = false;
 
 static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 50;
+
+static void refreshMotorActiveState(uint32_t nowMs) {
+    motorActive = g_motorActive ||
+                  (g_overrideUntilMs != 0u && (int32_t)(nowMs - g_overrideUntilMs) < 0) ||
+                  (g_calmDurationMs != 0u && (uint32_t)(nowMs - g_calmStartMs) < g_calmDurationMs) ||
+                  isTherapyRunning ||
+                  isCalibrationRunning ||
+                  isTrainingMotorAlertActive;
+}
 
 // ── Public API ─────────────────────────────────────────────────────────────
 static void applyDuty(uint8_t duty) {
@@ -26,6 +40,10 @@ static void applyDuty(uint8_t duty) {
     if (duty == g_dutyApplied) return;
     g_dutyApplied = duty;
     g_motorActive = duty != 0;
+    refreshMotorActiveState(millis());
+    if (duty != 0u) {
+        inactivityTimerReset();
+    }
 
     // Use hardware PWM via analogWrite to prevent excessive startup current and brownout resets
     analogWrite(PIN_MOTOR, duty);
@@ -67,6 +85,7 @@ void motorSetup() {
     g_calmStartMs = 0;
     g_calmDurationMs = 0;
     g_motorActive = false;
+    motorActive = false;
 }
 
 void motorSetDuty(uint8_t duty) {
@@ -85,6 +104,8 @@ void motorOverrideDuty(uint8_t duty, uint16_t durationMs) {
     g_overrideUntilMs = millis() + durationMs;
     g_calmDurationMs = 0;
     applyDuty(g_overrideDuty);
+    refreshMotorActiveState(millis());
+    inactivityTimerReset();
 }
 
 void motorStartCalmHaptic(uint16_t durationMs) {
@@ -93,6 +114,8 @@ void motorStartCalmHaptic(uint16_t durationMs) {
     g_calmStartMs = millis();
     g_calmDurationMs = durationMs;
     applyDuty(0);
+    refreshMotorActiveState(millis());
+    inactivityTimerReset();
 }
 
 void motorCancelCalmHaptic() {
@@ -101,6 +124,7 @@ void motorCancelCalmHaptic() {
     if (wasActive) {
         applyDuty(g_dutyWanted);
     }
+    refreshMotorActiveState(millis());
 }
 
 void motorCancelFeedback() {
@@ -108,21 +132,29 @@ void motorCancelFeedback() {
     g_overrideDuty = 0;
     g_calmDurationMs = 0;
     applyDuty(g_dutyWanted);
+    refreshMotorActiveState(millis());
 }
 
 bool motorIsActive() {
-    return g_motorActive || g_overrideUntilMs != 0u || g_calmDurationMs != 0u;
+    return motorActive;
+}
+
+bool motorOutputIsOn() {
+    return g_dutyApplied != 0u;
 }
 
 void motorUpdate() {
     const uint32_t now = millis();
     if (overrideActive(now)) {
         applyDuty(g_overrideDuty);
+        refreshMotorActiveState(now);
         return;
     }
     if (calmHapticActive(now)) {
         applyDuty(calmHapticDuty(now));
+        refreshMotorActiveState(now);
         return;
     }
     applyDuty(g_dutyWanted);
+    refreshMotorActiveState(now);
 }

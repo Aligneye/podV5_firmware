@@ -1,15 +1,18 @@
 #include "calibration.h"
 #include "bluetooth.h"
 #include "button.h"
+#include "sleep.h"
 #include "motor.h"
 #include "therapy.h"
 #include "training.h"
 #include "storage.h"
-#include "monitor_log.h"
+#include "rtt_debugger.h"
 #include <math.h>
 #include <string.h>
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 // ── State Machine Timings ───────────────────────────────────────────────────
 enum CalibState { CALIB_STATE_IDLE, CALIB_STATE_GET_READY, CALIB_STATE_HOLD_STILL };
@@ -21,6 +24,7 @@ static constexpr uint32_t CALIB_TOTAL_MS           = CALIB_GET_READY_MS + CALIB_
 static constexpr uint32_t CALIB_RESULT_BROADCAST_MS = 4000UL;
 static constexpr uint32_t kSafetyTimeoutMs         = CALIB_TOTAL_MS + 2000UL;
 static constexpr uint32_t kSampleIntervalMs        = 50UL;
+static constexpr uint32_t kBleProgressIntervalMs   = 1000UL;
 static constexpr int      kMaxCalibrationSamples   = 200;
 static constexpr int      MIN_VALID_SAMPLES        = 70;
 static constexpr int      kEarlyFailMinSamples     = 40;
@@ -29,9 +33,11 @@ static constexpr float    kEarlyFailStdDevLimit    = 1.75f;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
+bool isCalibrationRunning = false;
 
 static unsigned long stabilityStartTime = 0;
 static unsigned long lastHoldPrintMs     = 0;
+static unsigned long s_lastBleProgressMs = 0;
 
 static int           totalSamples       = 0;
 static unsigned long s_lastSampleTime   = 0;
@@ -93,8 +99,13 @@ static void goToTrainingMode() {
     s_pendingProfileName[0] = '\0';
 }
 
+static void goToIdleMode() {
+    deviceOn = true;
+    setDeviceMode(MODE_IDLE);
+    s_pendingProfileName[0] = '\0';
+}
+
 static void calibrationFail(const char* reason) {
-    calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibResultSetAt = millis();
@@ -114,10 +125,12 @@ static void calibrationFail(const char* reason) {
         snprintf(payload, sizeof(payload), "{\"event\":\"failed\",\"reason\":\"%s\"}", reason);
         logPacket("CALIB", payload);
     }
+    calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
     notifyCalibrationStatus("failed", "done");
     notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, reason);
-
-    goToTrainingMode();
+    goToIdleMode();
+    inactivityTimerHoldoffAfterCalibration();
 }
 
 static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples) {
@@ -131,7 +144,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     s_lastCalibrationValid = true;   // needed because addNextCalibrationProfile() may read this
 
     if (quality < 50) {
-        calibState = CALIB_STATE_IDLE;
         strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
         lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
         calibResultSetAt = millis();
@@ -139,6 +151,8 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_lastCalibrationValid = false;
 
         logEvent("CALIB", "quality_too_low");
+        calibState = CALIB_STATE_IDLE;
+        isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", 0u, quality, passedSamples, "LOW_QUALITY");
 
@@ -146,7 +160,8 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_failVibEndMs = millis() + 500UL;
         motorOverrideDuty(150, 500);
 
-        goToTrainingMode();
+        goToIdleMode();
+        inactivityTimerHoldoffAfterCalibration();
         return;
     }
 
@@ -162,7 +177,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     logEvent("CALIB", saveSuccess ? "after_profile_save_ok" : "after_profile_save_fail");
 
     if (!saveSuccess) {
-        calibState = CALIB_STATE_IDLE;
         strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
         lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
         calibResultSetAt = millis();
@@ -170,6 +184,8 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_lastCalibrationValid = false;
 
         logEvent("CALIB", "profile_save_failed");
+        calibState = CALIB_STATE_IDLE;
+        isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", 0u, quality, passedSamples, "PROFILE_SAVE_FAILED");
 
@@ -177,11 +193,11 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_failVibEndMs = millis() + 500UL;
         motorOverrideDuty(150, 500);
 
-        goToTrainingMode();
+        goToIdleMode();
+        inactivityTimerHoldoffAfterCalibration();
         return;
     }
 
-    calibState = CALIB_STATE_IDLE;
     strncpy(lastCalibrationResult, "complete", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibResultSetAt = millis();
@@ -201,6 +217,8 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
 
     // Keep this as "complete" for app compatibility.
     logEvent("CALIB", "before_notify_done");
+    calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
     notifyCalibrationStatus("complete", "done");
 
     notifyCalibrationComplete(true,
@@ -219,6 +237,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     motorOverrideDuty(150, 125);
 
     goToTrainingMode();
+    inactivityTimerHoldoffAfterCalibration();
 }
 
 static CalibrationStats calculateCalibrationStats(int sampleLimit) {
@@ -276,12 +295,14 @@ void setPendingCalibrationName(const char* name) {
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 void initCalibration() {
     calibState   = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
     pendingStart = false;
     pendingCancel = false;
     motorSetDuty(0);
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastSampleTime    = 0;
+    s_lastBleProgressMs = 0;
     s_lastCalibrationValid = false;
     totalSamples = 0;
 
@@ -307,6 +328,10 @@ void handleCalibration() {
     }
 
     const unsigned long elapsed = currentMillis - stabilityStartTime;
+    if ((currentMillis - s_lastBleProgressMs) >= kBleProgressIntervalMs) {
+        s_lastBleProgressMs = currentMillis;
+        notifyCalibrationStatus("", "");
+    }
 
 #if ALIGN_RTT_CALIB_VERBOSE
     static unsigned long lastDebugPrintMs = 0;
@@ -335,8 +360,10 @@ void handleCalibration() {
         if (elapsed >= CALIB_GET_READY_MS) {
             calibState = CALIB_STATE_HOLD_STILL;
             lastHoldPrintMs = currentMillis;
+            s_lastBleProgressMs = currentMillis;
             s_lastSampleTime = currentMillis - kSampleIntervalMs;
             totalSamples = 0;
+            notifyCalibrationStatus("", "");
             rtt.println("CALIBRATION: HOLD STILL - 5 sec");
         }
         return;
@@ -463,15 +490,15 @@ void startCalibration() {
         return;
     }
 
+    // Put the device into a quiet neutral state before sampling.
+    therapyStop(false);
+    setDeviceMode(MODE_IDLE);
+    motorSetDuty(0);
+
     if (!sensorInitialized) {
         calibrationStartBlocked("SENSOR_NOT_INITIALIZED");
         return;
     }
-
-    // Force stop therapy and set training mode before starting
-    therapyStop(false);
-    setDeviceMode(MODE_TRAINING);
-    motorSetDuty(0);
 
     lastCalibrationResult[0] = '\0';
     calibResultSetAt = 0;
@@ -483,8 +510,11 @@ void startCalibration() {
     motorOverrideDuty(150, 150);
 
     calibState         = CALIB_STATE_GET_READY;
+    isCalibrationRunning  = true;
     stabilityStartTime = millis();
     lastHoldPrintMs    = millis();
+    s_lastBleProgressMs = stabilityStartTime;
+    inactivityTimerReset();
 
     totalSamples = 0;
 
@@ -500,13 +530,15 @@ void cancelCalibration() {
         return;
     }
     logEvent("CALIB", "cancelled");
-    notifyCalibrationStatus("cancelled", "done");
     calibState = CALIB_STATE_IDLE;
+    isCalibrationRunning = false;
+    notifyCalibrationStatus("cancelled", "done");
     motorSetDuty(0);
+    motorUpdate();
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastCalibrationValid = false;
-    goToTrainingMode();
+    goToIdleMode();
 }
 
 const char* getCalibrationResult() {
@@ -525,7 +557,7 @@ const char* getCalibrationResult() {
 }
 
 bool isCalibrating() {
-    return calibState != CALIB_STATE_IDLE;
+    return isCalibrationRunning;
 }
 
 uint32_t getCalibrationElapsedMs() {

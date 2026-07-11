@@ -3,12 +3,14 @@
 #include "session_log.h"
 #include "therapy.h"
 #include "nrf.h"
+#include "rtt_debugger.h"
 #include <RTTStream.h>
 #include <string.h>
 #include <math.h>
-#include "monitor_log.h"
 
 extern RTTStream rtt;
+static AlignRttSilencer s_nonBleRtt;
+#define rtt s_nonBleRtt
 
 #if __has_include(<InternalFileSystem.h>)
 #include <Adafruit_LittleFS.h>
