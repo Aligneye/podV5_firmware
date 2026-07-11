@@ -4,7 +4,6 @@
 #include "sleep.h"
 #include "motor.h"
 #include "session_stats.h"
-#include "step_count.h"
 #include "storage.h"
 #include "rtt_debugger.h"
 #include <Adafruit_LIS3DH.h>
@@ -20,7 +19,6 @@ button.h → current mode aur button-related variables
 calibration.h → calibration chal rahi hai ya nahi
 motor.h → vibration motor control
 session_stats.h → training session start/end tracking
-step_count.h → step counting
 storage.h → saved calibration load/save
 Adafruit_LIS3DH.h → LIS3DH accelerometer sensor library
 Wire.h → I2C communication
@@ -165,18 +163,6 @@ static bool trainingIngestAccelSample(void) {
   rawY = e.acceleration.y;
   rawZ = e.acceleration.z;
 
-  const uint32_t stepBefore = stepCountGetTotal();
-  stepCountProcessSample(rawX, rawY, rawZ, now);
-  const uint32_t stepAfter = stepCountGetTotal();
-#if ALIGN_RTT_SENSOR_LOG
-  if (!isCalibrating() && stepAfter > stepBefore) {
-    rtt.print("[Step Trigger] count=");
-    rtt.println((unsigned long)stepAfter);
-  }
-#else
-  (void)stepBefore;
-  (void)stepAfter;
-#endif
 
   if (!s_lpfSeeded) {
     g_fx = rawX;
@@ -491,8 +477,7 @@ static void logTrainingSensorRtt(uint32_t now) {
   rtt.print(postureText);
   rtt.print(" | sub=");
   rtt.print(trainingSubModes[static_cast<uint8_t>(trainingSubModeIndex)]);
-  rtt.print(" | steps=");
-  rtt.println((unsigned long)stepCountGetTotal());
+  rtt.print(" | steps=0");
 #else
   (void)now;
 #endif
@@ -579,7 +564,7 @@ void wakePostureSensor() {
 
 bool isDeviceMoving() { return _moving; }
 
-uint32_t getDeviceStepCount() { return stepCountGetTotal(); }
+uint32_t getDeviceStepCount() { return 0; }
 
 void trainingStart() {
   rtt.println("Training: start");
@@ -601,7 +586,6 @@ void trainingStop() {
 }
 
 void trainingSetup() {
-  stepCountInit();
   initPostureSensor();
 }
 
