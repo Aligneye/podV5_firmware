@@ -97,9 +97,9 @@ static void handleSingleClick() {
     return;
   }
 
-  // Cycle modes: Training -> Therapy -> Off -> Training
-  Mode nextMode = (Mode)((currentMode + 1) % MODE_COUNT);
-  setDeviceMode(nextMode);
+  // Training <-> Idle toggle: from Training, click returns to Idle;
+  // from anywhere else (Idle, Therapy), click goes to Training.
+  setDeviceMode(currentMode == MODE_TRAINING ? MODE_IDLE : MODE_TRAINING);
 }
 
 static void handleDoubleClick() {
@@ -134,13 +134,8 @@ static void handleDoubleClick() {
     break;
 
   case MODE_IDLE:
-    DEBUG_PRINTLN("Entering OTA DFU from IDLE mode");
-    setDeviceMode((Mode)MODE_DFU);
-    notifyDfuStatus("ARMED");
-    logEvent("DFU", "entering_ota_bootloader");
-    notifyDfuStatus("ENTERED");
-    delay(50);
-    enterOTADfu();
+    DEBUG_PRINTLN("Entering calibration from IDLE mode");
+    calibrationRequestStart();
     break;
 
   default:
@@ -178,8 +173,8 @@ static void handleHold() {
     return;
   }
 
-  setDeviceMode(MODE_IDLE);
-  calibrationRequestStart();
+  // Universal: hold always goes to Therapy, regardless of current mode.
+  setDeviceMode(MODE_THERAPY);
 }
 
 void buttonSetup() {
