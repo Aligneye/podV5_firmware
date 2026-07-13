@@ -31,6 +31,11 @@ static constexpr int      kEarlyFailMinSamples     = 40;
 static constexpr float    kFinalStdDevLimit        = 1.0f;
 static constexpr float    kEarlyFailStdDevLimit    = 1.75f;
 
+// Calm result haptics: smooth ramp-up/ramp-down "breathing" pulse rather than a hard buzz.
+// Fail rings noticeably longer than success so the two are distinguishable by feel alone.
+static constexpr uint16_t kCalibSuccessHapticMs    = 350U;
+static constexpr uint16_t kCalibFailHapticMs       = 750U;
+
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
 bool isCalibrationRunning = false;
@@ -109,11 +114,6 @@ static void calibrationFail(const char* reason) {
     strncpy(lastCalibrationResult, "failed", sizeof(lastCalibrationResult) - 1);
     lastCalibrationResult[sizeof(lastCalibrationResult) - 1] = '\0';
     calibResultSetAt = millis();
-    
-    // Failure pulse: 500ms duration, 150 duty cycle
-    motorSetDuty(0);
-    s_failVibEndMs = millis() + 500UL;
-    motorOverrideDuty(150, 500);
 
     s_lastCalibrationValid = false;
 
@@ -130,6 +130,12 @@ static void calibrationFail(const char* reason) {
     notifyCalibrationStatus("failed", "done");
     notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, reason);
     goToIdleMode();
+
+    // Calm, longer ring on failure — smooth ramp up/down, no hard buzz.
+    // Started after the mode transition so setDeviceMode()'s motorCancelFeedback() can't wipe it.
+    s_failVibEndMs = millis() + kCalibFailHapticMs;
+    motorStartCalmHaptic(kCalibFailHapticMs);
+
     inactivityTimerHoldoffAfterCalibration();
 }
 
@@ -155,12 +161,11 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", 0u, quality, passedSamples, "LOW_QUALITY");
-
-        motorSetDuty(0);
-        s_failVibEndMs = millis() + 500UL;
-        motorOverrideDuty(150, 500);
-
         goToIdleMode();
+
+        s_failVibEndMs = millis() + kCalibFailHapticMs;
+        motorStartCalmHaptic(kCalibFailHapticMs);
+
         inactivityTimerHoldoffAfterCalibration();
         return;
     }
@@ -188,12 +193,11 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", 0u, quality, passedSamples, "PROFILE_SAVE_FAILED");
-
-        motorSetDuty(0);
-        s_failVibEndMs = millis() + 500UL;
-        motorOverrideDuty(150, 500);
-
         goToIdleMode();
+
+        s_failVibEndMs = millis() + kCalibFailHapticMs;
+        motorStartCalmHaptic(kCalibFailHapticMs);
+
         inactivityTimerHoldoffAfterCalibration();
         return;
     }
@@ -232,11 +236,13 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
                               passedSamples);
     logEvent("CALIB", "after_notify_done");
 
-    motorSetDuty(0);
-    s_successPulseEndMs = millis() + 125UL;
-    motorOverrideDuty(150, 125);
-
     goToTrainingMode();
+
+    // Calm, brief ring on success — smooth ramp up/down, no hard buzz.
+    // Started after the mode transition so setDeviceMode()'s motorCancelFeedback() can't wipe it.
+    s_successPulseEndMs = millis() + kCalibSuccessHapticMs;
+    motorStartCalmHaptic(kCalibSuccessHapticMs);
+
     inactivityTimerHoldoffAfterCalibration();
 }
 
@@ -538,7 +544,15 @@ void cancelCalibration() {
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastCalibrationValid = false;
-    goToIdleMode();
+
+    deviceOn = true;
+    s_pendingProfileName[0] = '\0';
+
+    // No forced setDeviceMode(MODE_IDLE) here: calibration is only ever cancelled either
+    // while currentMode is already Idle (nothing to do), or after a button handler
+    // (single-click/hold in button.cpp) has already redirected to Training/Therapy earlier
+    // in the same loop() iteration as a side effect of calling setDeviceMode() itself.
+    // Forcing Idle here would stomp that redirect back to Idle.
 }
 
 const char* getCalibrationResult() {

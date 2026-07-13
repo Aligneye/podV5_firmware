@@ -17,7 +17,9 @@ static volatile uint16_t g_calmDurationMs = 0;
 static volatile bool g_motorActive = false;
 bool motorActive = false;
 
-static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 50;
+// Must be strong enough to overcome the ERM motor's stiction (compare button-press pulse:
+// 130, calibration-start pulse: 150) — anything much lower may never physically spin the motor.
+static constexpr uint8_t CALM_HAPTIC_PEAK_DUTY = 170;
 
 static void refreshMotorActiveState(uint32_t nowMs) {
     motorActive = g_motorActive ||
@@ -63,15 +65,25 @@ static bool calmHapticActive(uint32_t nowMs) {
     return false;
 }
 
+// Trapezoid envelope (ramp up / hold at peak / ramp down) rather than a bare triangle —
+// a linear ramp that touches peak duty for only an instant may end before the motor's
+// rotor has physically spun up, so it needs a real dwell period at full peak to be felt.
 static uint8_t calmHapticDuty(uint32_t nowMs) {
     uint32_t elapsed = nowMs - g_calmStartMs;
-    uint32_t half = g_calmDurationMs / 2u;
-    if (half == 0u) return 0;
+    uint32_t rampMs = g_calmDurationMs / 4u;
+    if (rampMs == 0u) return CALM_HAPTIC_PEAK_DUTY;
 
-    uint32_t level = (elapsed < half)
-        ? (elapsed * CALM_HAPTIC_PEAK_DUTY) / half
-        : ((g_calmDurationMs - elapsed) * CALM_HAPTIC_PEAK_DUTY) / half;
+    if (elapsed < rampMs) {
+        return (uint8_t)((elapsed * CALM_HAPTIC_PEAK_DUTY) / rampMs);
+    }
 
+    uint32_t holdEndMs = g_calmDurationMs - rampMs;
+    if (elapsed < holdEndMs) {
+        return CALM_HAPTIC_PEAK_DUTY;
+    }
+
+    uint32_t remaining = (g_calmDurationMs > elapsed) ? (g_calmDurationMs - elapsed) : 0u;
+    uint32_t level = (remaining * CALM_HAPTIC_PEAK_DUTY) / rampMs;
     return (uint8_t)constrain((int)level, 0, CALM_HAPTIC_PEAK_DUTY);
 }
 

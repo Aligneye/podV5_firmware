@@ -96,16 +96,14 @@ void setDeviceMode(Mode newMode) {
 static void handleSingleClick() {
   DEBUG_PRINTLN("Single click");
   if (isCalibrating()) {
-    DEBUG_PRINTLN("Button click detected during calibration - canceling");
-    calibrationRequestCancel();
-    return;
+    DEBUG_PRINTLN("Button click detected during calibration - canceling and shifting to Training");
   }
 
-  // Cycle modes: Training -> Therapy -> Off -> Training
-  Mode nextMode = (Mode)((currentMode + 1) % MODE_COUNT);
-  DEBUG_PRINT("Cycling mode to: ");
-  DEBUG_PRINTLN(modeNames[nextMode]);
-  setDeviceMode(nextMode);
+  // Training <-> Idle toggle: from Training, click returns to Idle;
+  // from anywhere else (Idle, Therapy), click goes to Training.
+  // Calibration only ever runs from Idle, so this always resolves to Training,
+  // and setDeviceMode() cancels the in-progress calibration as a side effect.
+  setDeviceMode(currentMode == MODE_TRAINING ? MODE_IDLE : MODE_TRAINING);
 }
 
 static void handleDoubleClick() {
@@ -140,13 +138,8 @@ static void handleDoubleClick() {
     break;
 
   case MODE_IDLE:
-    DEBUG_PRINTLN("Entering OTA DFU from IDLE mode");
-    setDeviceMode((Mode)MODE_DFU);
-    notifyDfuStatus("ARMED");
-    logEvent("DFU", "entering_ota_bootloader");
-    notifyDfuStatus("ENTERED");
-    delay(50);
-    enterOTADfu();
+    DEBUG_PRINTLN("Entering calibration from IDLE mode");
+    calibrationRequestStart();
     break;
 
   default:
@@ -180,12 +173,12 @@ static void handleHold() {
   DEBUG_PRINTLN("Hold");
 
   if (isCalibrating()) {
-    DEBUG_PRINTLN("Button hold detected during calibration - ignoring");
-    return;
+    DEBUG_PRINTLN("Button hold detected during calibration - canceling and shifting to Therapy");
   }
 
-  setDeviceMode(MODE_IDLE);
-  calibrationRequestStart();
+  // Universal: hold always goes to Therapy, regardless of current mode.
+  // setDeviceMode() cancels an in-progress calibration as a side effect.
+  setDeviceMode(MODE_THERAPY);
 }
 
 void buttonSetup() {
