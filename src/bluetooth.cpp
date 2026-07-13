@@ -131,7 +131,9 @@ static void sendDeviceInfoPacket() {
 }
 
 static void sendTherapyPlanPacket() {
-    if (!pCharacteristic || !connected || !therapyIsRunning()) return;
+    if (!pCharacteristic || !connected) return;
+
+    therapyEnsurePatternsInitialized();
 
     uint8_t seq[30];
     int total = getTherapyPatternSequence(seq, 30);
@@ -162,14 +164,15 @@ static void sendTherapyLivePacket() {
 
     char payload[256];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"TL\",\"sid\":%lu,\"idx\":%d,\"pid\":%d,\"elapsed\":%lu,\"remaining\":%lu,\"p_elapsed\":%lu,\"p_remaining\":%lu}",
+             "{\"t\":\"TL\",\"sid\":%lu,\"idx\":%d,\"pid\":%d,\"elapsed\":%lu,\"remaining\":%lu,\"p_elapsed\":%lu,\"p_remaining\":%lu,\"intensity\":%d}",
              (unsigned long)therapyGetSessionId(),
              (int)therapyGetCurrentPatternIndex(),
              (int)therapyGetCurrentPatternId(),
              (unsigned long)therapyGetElapsedSeconds(),
              (unsigned long)therapyGetRemainingSeconds(),
              (unsigned long)therapyGetPatternElapsedSeconds(),
-             (unsigned long)therapyGetPatternRemainingSeconds());
+             (unsigned long)therapyGetPatternRemainingSeconds(),
+             therapyIntensityLevel);
     sendBlePacket(payload);
 }
 
@@ -497,11 +500,11 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     disconnectionHapticPending = true;
     forceLiveSync = false;
     connectedSinceMs = 0UL;
-    // rtt.print("[BLE EVT] disconnected reason=0x");
-    // rtt.print(reason, HEX);
-    // rtt.print(" (");
-    // rtt.print(bleDisconnectReasonText(reason));
-    // rtt.println(")");
+    rtt.print("[BLE EVT] disconnected reason=0x");
+    rtt.print(reason, HEX);
+    rtt.print(" (");
+    rtt.print(bleDisconnectReasonText(reason));
+    rtt.println(")");
 
     if (clearBondsAfterDisconnect) {
         clearBondsAfterDisconnect = false;
@@ -516,12 +519,25 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     startAdvertising();
 }
 
+static void onBlePairComplete(uint16_t conn_handle, uint8_t auth_status) {
+    (void)conn_handle;
+    rtt.print("[BLE SEC] pairing complete status=0x");
+    rtt.println(auth_status, HEX);
+
+    if (auth_status == BLE_GAP_SEC_STATUS_SUCCESS) {
+        blePairingKnownPaired = true;
+        pairingUnlockActive = false;
+        saveBlePairMarker(true);
+    }
+}
+
 static void onBleSecured(uint16_t conn_handle) {
     (void)conn_handle;
     blePairingKnownPaired = true;
     pairingUnlockActive = false;
     connectionHapticPending = true;
-    // rtt.println("[BLE EVT] secured");
+    saveBlePairMarker(true);
+    rtt.println("[BLE SEC] link encrypted");
 }
 
 static bool applyMode(const String &valueRaw) {
@@ -675,15 +691,9 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
 }
 
 static void stopTherapyFromBle() {
-    if (currentMode == MODE_THERAPY) {
-        setDeviceMode(MODE_TRAINING);
-    } else {
-        therapyStop(false);
-    }
-    deviceOn = true;
+    setDeviceMode(MODE_IDLE);
     forceTelemetrySync = true;
     forceLiveSync = true;
-    // logEvent("BLE", "therapy_stop");
 }
 
 static bool trainingtop() {
@@ -1062,12 +1072,29 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 sendDeviceInfoPacket();
                 ok = true;
             } else if (cmd == "GET_THERAPY_PLAN") {
-                if (therapyIsRunning()) {
-                    sendTherapyPlanPacket();
-                } else {
-                    forceTelemetrySync = true;
-                }
+                sendTherapyPlanPacket();
                 ok = true;
+            } else if (cmd == "THERAPY_START") {
+                uint32_t duration = 0;
+                uint32_t intensity = 0;
+                bool hasDuration = extractJsonIntField(payload, "therapy_duration", duration);
+                bool hasIntensity = extractJsonIntField(payload, "therapy_intensity", intensity);
+                if (hasDuration && hasIntensity) {
+                    if ((duration == 10 || duration == 20 || duration == 30) && (intensity >= 1 && intensity <= 3)) {
+                        if (duration == 10) {
+                            therapySubModeIndex = 0;
+                        } else if (duration == 20) {
+                            therapySubModeIndex = 1;
+                        } else if (duration == 30) {
+                            therapySubModeIndex = 2;
+                        }
+                        storageSaveTherapySubMode(therapySubModeIndex);
+                        therapyIntensityLevel = (int)intensity;
+                        setDeviceMode(MODE_THERAPY);
+                        therapyStart();
+                        ok = true;
+                    }
+                }
             } else if (cmd == "TRAINING_STOP") {
                 ok = trainingtop();
             } else if (cmd == "THERAPY_START") {
@@ -1189,11 +1216,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 requestCalibrationStart();
             }
         } else if (cmdName == "GET_THERAPY_PLAN") {
-            if (therapyIsRunning()) {
-                sendTherapyPlanPacket();
-            } else {
-                forceTelemetrySync = true;
-            }
+            sendTherapyPlanPacket();
         } else if (cmdName == "STOP_THERAPY" || cmdName == "THERAPY_STOP" ||
                    cmdName == "STOP THERAPY" || cmdName == "STOP") {
             stopTherapyFromBle();
@@ -1265,6 +1288,11 @@ void bluetoothSetup() {
         Bluefruit.setTxPower(4); // dBm
         Bluefruit.Periph.setConnectCallback(onBleConnect);
         Bluefruit.Periph.setDisconnectCallback(onBleDisconnect);
+        // The pod has no display or keyboard, so use bonded Just Works pairing
+        // explicitly and keep MITM disabled to match ENC_NO_MITM permissions.
+        Bluefruit.Security.setIOCaps(false, false, false);
+        Bluefruit.Security.setMITM(false);
+        Bluefruit.Security.setPairCompleteCallback(onBlePairComplete);
         Bluefruit.Security.setSecuredCallback(onBleSecured);
 
         gService.begin();

@@ -28,6 +28,7 @@ extern bool isTherapyRunning;
 
 void therapySetup();
 void therapyLoop();
+void therapyEnsurePatternsInitialized();
 
 void therapyStart();
 /** Stops motor + therapy state. If returnToTraining is false, leaves currentMode unchanged (e.g. sub-mode restart). */
