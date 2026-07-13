@@ -20,13 +20,10 @@ Reviewed `src/bluetooth.cpp`, `include/bluetooth.h`, the installed Adafruit Blue
 - **Impact:** The app's brace-depth framing never receives a complete `P` object. Profile refresh/selection can stop working precisely when the supported eight-slot store is full, and later packets can be consumed as part of the unterminated object until the app clears its buffer.
 - **Suggested fix:** Paginate profiles into independently valid JSON packets, or define a compact multi-packet framing protocol with page/index fields. Do not rely on increasing the GATT value beyond its 512-byte maximum.
 
-### 2. The app's therapy-duration command is silently ignored
+### 2. ~~The app's therapy-duration command is silently ignored~~ FIXED
 
-- **Severity:** High
-- **Location:** `src/bluetooth.cpp:1097`, `src/bluetooth.cpp:1101`, `src/therapy.cpp:282`
-- **Evidence / trigger:** The app sends `THERAPY_INTENSITY=<1-3>;THERAPY_DURATION_MIN=<10|20|30>;MODE=THERAPY` (`private/aligneye_ble_protocol_docs.md:34`). The legacy parser handles `THERAPY_INTENSITY` and `MODE`, but has no `THERAPY_DURATION_MIN` branch. `therapyStart()` therefore uses the previously stored/button-selected `therapySubModeIndex`, not the duration in the command.
-- **Impact:** A user selecting 20 or 30 minutes in the app can receive a 10-minute session, or any other previously persisted duration, while the command appears to have succeeded.
-- **Suggested fix:** Parse and strictly validate 10/20/30 before applying `MODE=THERAPY`, update `therapySubModeIndex`, persist it if desired, and return an explicit failure for invalid values.
+- **Status:** Resolved
+- **Fix:** Added JSON command `THERAPY_START` (accepts `therapy_intensity` 1-3 and `therapy_duration` 10/20/30). The new `startTherapyFromBle()` validates both fields, sets `therapyIntensityLevel` and `therapySubModeIndex`, persists to flash, then triggers mode switch. Legacy `THERAPY_INTENSITY` key-value parsing removed; legacy `MODE=THERAPY` semicolon path blocked. JSON `SET_MODE` with `"mode":"THERAPY"` still works for mode switching without overriding duration/intensity.
 
 ### 3. Offline session synchronization is not implemented
 

@@ -548,7 +548,6 @@ static bool applyMode(const String &valueRaw) {
         setDeviceMode(MODE_THERAPY);
         forceTelemetrySync = true;
         forceLiveSync = true;
-        // logEvent("BLE", "mode_therapy");
         return true;
     } else if (value == "IDLE" || value == "OFF") {
         setDeviceMode(MODE_IDLE);
@@ -636,6 +635,40 @@ static bool startTrainingFromBle(TrainingAlertStyle subMode,
     trainingDelayedAlertMs = delayMs;
     deviceOn = true;
     setDeviceMode(MODE_TRAINING);
+    markSubModeChanged();
+    bluetoothNotifyStateChanged();
+    return true;
+}
+
+static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const char*& error) {
+    if (isCalibrating()) {
+        error = "CALIBRATING";
+        return false;
+    }
+    if (therapyIsRunning()) {
+        error = "ALREADY_RUNNING";
+        return false;
+    }
+
+    uint8_t subModeIdx;
+    switch (durationMin) {
+        case 10: subModeIdx = 0; break;
+        case 20: subModeIdx = 1; break;
+        case 30: subModeIdx = 2; break;
+        default: error = "BAD_DURATION"; return false;
+    }
+
+    if (intensity < 1 || intensity > 3) {
+        error = "BAD_INTENSITY";
+        return false;
+    }
+
+    therapyIntensityLevel = (int)intensity;
+    therapySubModeIndex = subModeIdx;
+    storageSaveTherapySubMode(therapySubModeIndex);
+
+    deviceOn = true;
+    setDeviceMode(MODE_THERAPY);
     markSubModeChanged();
     bluetoothNotifyStateChanged();
     return true;
@@ -810,17 +843,7 @@ static void applyTZOffset(const String &valueRaw) {
     // logPacket("BLE", payload);
 }
 
-static void applyTherapyIntensity(const String &valueRaw) {
-    String value = valueRaw;
-    value.trim();
-    int level = value.toInt();
-    if (level >= 1 && level <= 3) {
-        therapyIntensityLevel = level;
-        char payload[48];
-        snprintf(payload, sizeof(payload), "{\"therapy_intensity\":%d}", level);
-        // logPacket("BLE", payload);
-    }
-}
+
 
 static void applyDifficultyDegrees(const String &valueRaw) {
     String value = valueRaw;
@@ -1047,6 +1070,18 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 ok = true;
             } else if (cmd == "TRAINING_STOP") {
                 ok = trainingtop();
+            } else if (cmd == "THERAPY_START") {
+                uint32_t intensity = 0u;
+                uint32_t durationMin = 0u;
+                if (!extractJsonIntField(payload, "therapy_intensity", intensity) &&
+                    !extractJsonIntField(payload, "intensity", intensity)) {
+                    error = "BAD_REQUEST";
+                } else if (!extractJsonIntField(payload, "therapy_duration", durationMin) &&
+                           !extractJsonIntField(payload, "duration_min", durationMin)) {
+                    error = "BAD_REQUEST";
+                } else {
+                    ok = startTherapyFromBle(intensity, durationMin, error);
+                }
             } else if (cmd == "STOP_THERAPY" || cmd == "THERAPY_STOP" ||
                        cmd == "STOP THERAPY" || cmd == "STOP") {
                 stopTherapyFromBle();
@@ -1098,8 +1133,6 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 requestedMode = value;
             } else if (key == "CMD") {
                 cmdName = value;
-            } else if (key == "THERAPY_INTENSITY") {
-                applyTherapyIntensity(value);
             } else if (key == "DIFFICULTY_DEG") {
                 applyDifficultyDegrees(value);
             } else if (key == "PROFILE") {
@@ -1190,7 +1223,10 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
     }
 
     if (requestedMode.length() > 0) {
-        applyMode(requestedMode);
+        requestedMode.toUpperCase();
+        if (requestedMode != "THERAPY") {
+            applyMode(requestedMode);
+        }
     }
 }
 
