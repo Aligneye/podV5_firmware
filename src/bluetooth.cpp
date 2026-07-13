@@ -67,7 +67,7 @@ static bool batteryReadValid = false;
 static bool batteryBlinkActive = false;
 static unsigned long batteryBlinkStartMs = 0;
 
-static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 150UL;
+static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 500UL;
 static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;

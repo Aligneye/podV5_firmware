@@ -42,7 +42,7 @@ Flashing uses a custom script (`upload_hooks.py`) that invokes OpenOCD with CMSI
 
 **Session lifecycle** (`src/session_stats.cpp`): Training and therapy sessions run concurrently with independent event buffers. Sessions are only promoted (counted) after 30 seconds of activity to filter noise. Up to 120 sessions persisted via `session_log.cpp`.
 
-**BLE** (`src/bluetooth.cpp`): Single bidirectional characteristic (`beb5483e-...`) carries all communication with the mobile app — live telemetry (150ms interval), therapy plans, calibration results, and battery status. No separate characteristics per data type.
+**BLE** (`src/bluetooth.cpp`): Single bidirectional characteristic (`beb5483e-...`) carries all communication with the mobile app — live telemetry (500ms interval), therapy plans, calibration results, and battery status. No separate characteristics per data type.
 
 ## Key Configuration (`include/config.h`)
 
