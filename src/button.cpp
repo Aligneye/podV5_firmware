@@ -92,13 +92,13 @@ void setDeviceMode(Mode newMode) {
 
 static void handleSingleClick() {
   if (isCalibrating()) {
-    DEBUG_PRINTLN("Button click detected during calibration - canceling");
-    calibrationRequestCancel();
-    return;
+    DEBUG_PRINTLN("Button click detected during calibration - canceling and shifting to Training");
   }
 
   // Training <-> Idle toggle: from Training, click returns to Idle;
   // from anywhere else (Idle, Therapy), click goes to Training.
+  // Calibration only ever runs from Idle, so this always resolves to Training,
+  // and setDeviceMode() cancels the in-progress calibration as a side effect.
   setDeviceMode(currentMode == MODE_TRAINING ? MODE_IDLE : MODE_TRAINING);
 }
 
@@ -169,11 +169,11 @@ static void handleHold() {
   DEBUG_PRINTLN("Hold");
 
   if (isCalibrating()) {
-    DEBUG_PRINTLN("Button hold detected during calibration - ignoring");
-    return;
+    DEBUG_PRINTLN("Button hold detected during calibration - canceling and shifting to Therapy");
   }
 
   // Universal: hold always goes to Therapy, regardless of current mode.
+  // setDeviceMode() cancels an in-progress calibration as a side effect.
   setDeviceMode(MODE_THERAPY);
 }
 
