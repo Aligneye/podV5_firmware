@@ -544,7 +544,15 @@ void cancelCalibration() {
     s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastCalibrationValid = false;
-    goToIdleMode();
+
+    deviceOn = true;
+    s_pendingProfileName[0] = '\0';
+
+    // No forced setDeviceMode(MODE_IDLE) here: calibration is only ever cancelled either
+    // while currentMode is already Idle (nothing to do), or after a button handler
+    // (single-click/hold in button.cpp) has already redirected to Training/Therapy earlier
+    // in the same loop() iteration as a side effect of calling setDeviceMode() itself.
+    // Forcing Idle here would stomp that redirect back to Idle.
 }
 
 const char* getCalibrationResult() {
