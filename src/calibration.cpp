@@ -11,6 +11,7 @@
 #include <string.h>
 
 extern RTTStream rtt;
+static RTTStream& s_rttTiming = rtt;
 static AlignRttSilencer s_nonBleRtt;
 #define rtt s_nonBleRtt
 
@@ -30,6 +31,13 @@ static constexpr int      MIN_VALID_SAMPLES        = 70;
 static constexpr int      kEarlyFailMinSamples     = 40;
 static constexpr float    kFinalStdDevLimit        = 1.0f;
 static constexpr float    kEarlyFailStdDevLimit    = 1.75f;
+// Adaptive early finish: once enough samples exist to clear the full
+// validation bar, calibration completes as soon as the result would score
+// "Excellent" — a steady user finishes in ~4 s of hold instead of 5 s, and a
+// wobbly one still gets the whole window. Never lowers the quality bar.
+static constexpr int      kEarlyFinishMinSamples   = 75;
+static constexpr uint16_t kEarlyFinishQuality      = 85;
+static constexpr int      kStatsCheckEverySamples  = 5;
 
 // Calm result haptics: smooth ramp-up/ramp-down "breathing" pulse rather than a hard buzz.
 // Fail rings noticeably longer than success so the two are distinguishable by feel alone.
@@ -62,6 +70,8 @@ static float s_lastCalibratedY = 0.0f;
 static float s_lastCalibratedZ = 0.0f;
 static bool  s_lastCalibrationValid = false;
 static char  s_pendingProfileName[24] = "";
+static uint32_t s_pendingPersistTicket = 0;
+static uint32_t s_pendingPersistProfileId = 0;
 
 struct CalibrationStats {
     float meanX;
@@ -139,9 +149,10 @@ static void calibrationFail(const char* reason) {
     inactivityTimerHoldoffAfterCalibration();
 }
 
-static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples) {
-    CalibrationStats finalStats = calculateCalibrationStats(totalSamples);
-    const uint16_t quality = computeCalibrationQuality((uint32_t)passedSamples, finalStats);
+static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples,
+                               const CalibrationStats& stats) {
+    const uint32_t successStartedMs = millis();
+    const uint16_t quality = computeCalibrationQuality((uint32_t)passedSamples, stats);
     const char* qualityLabel = calibrationQualityLabel(quality);
 
     s_lastCalibratedX = avgX;
@@ -210,6 +221,12 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     const int activeIndex = getActiveProfileIndex();
     const uint8_t slot = (activeIndex >= 0) ? (uint8_t)(activeIndex + 1) : 0u;
     const uint32_t profileId = active ? active->id : 0u;
+    s_pendingPersistTicket = storageGetLatestDeferredPersistTicket();
+    s_pendingPersistProfileId = profileId;
+
+    s_rttTiming.print("[TIMING] calibration RAM save: ");
+    s_rttTiming.print(millis() - successStartedMs);
+    s_rttTiming.println(" ms");
 
     char payload[96];
     snprintf(payload, sizeof(payload),
@@ -234,6 +251,9 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
                               nullptr,
                               avgX, avgY, avgZ,
                               passedSamples);
+    s_rttTiming.print("[TIMING] calibration result dispatched: ");
+    s_rttTiming.print(millis() - successStartedMs);
+    s_rttTiming.println(" ms");
     logEvent("CALIB", "after_notify_done");
 
     goToTrainingMode();
@@ -283,6 +303,76 @@ static bool calibrationStatsTooUnstable(const CalibrationStats& stats, float lim
     return stats.stdDevX > limit || stats.stdDevY > limit || stats.stdDevZ > limit;
 }
 
+// Runs the final validation pipeline (stability gate → 2σ outlier rejection →
+// minimum-valid-sample gate) over the samples collected so far. Returns true
+// when calibration is concluded (success or failure) and the caller should
+// stop. On an early attempt (finalAttempt == false) any shortfall just means
+// "keep sampling", and success additionally requires an Excellent quality
+// score so finishing early can never degrade the stored result.
+static bool tryFinalizeCalibration(bool finalAttempt, const CalibrationStats& stats) {
+    if (calibrationStatsTooUnstable(stats, kFinalStdDevLimit)) {
+        if (finalAttempt) {
+            calibrationFail("MOVEMENT_TOO_HIGH");
+            return true;
+        }
+        return false;
+    }
+
+    // Reject outliers (mean +/- 2*sigma) and compute the final average.
+    float finalSumX = 0, finalSumY = 0, finalSumZ = 0;
+    int validCount = 0;
+
+    for (int i = 0; i < totalSamples; i++) {
+        // If stdDev is near zero, accept all (protect from floating point edge case)
+        bool okX = (stats.stdDevX < 0.01f) || (fabsf(samplesX[i] - stats.meanX) <= 2.0f * stats.stdDevX);
+        bool okY = (stats.stdDevY < 0.01f) || (fabsf(samplesY[i] - stats.meanY) <= 2.0f * stats.stdDevY);
+        bool okZ = (stats.stdDevZ < 0.01f) || (fabsf(samplesZ[i] - stats.meanZ) <= 2.0f * stats.stdDevZ);
+
+        if (okX && okY && okZ) {
+            finalSumX += samplesX[i];
+            finalSumY += samplesY[i];
+            finalSumZ += samplesZ[i];
+            validCount++;
+        } else if (finalAttempt) {
+#if ALIGN_RTT_CALIB_VERBOSE
+            rtt.printf("CALIB: Outlier Sample #%d rejected - raw[%s, %s, %s]\n",
+                       i + 1, String(samplesX[i], 2).c_str(), String(samplesY[i], 2).c_str(), String(samplesZ[i], 2).c_str());
+#endif
+        }
+    }
+
+#if ALIGN_RTT_CALIB_VERBOSE
+    if (finalAttempt) {
+        rtt.printf("CALIB RESULTS: Valid samples=%d/%d\n", validCount, totalSamples);
+    }
+#endif
+
+    if (validCount < MIN_VALID_SAMPLES) {
+        if (finalAttempt) {
+            calibrationFail("MOVEMENT_TOO_HIGH");
+            return true;
+        }
+        return false;
+    }
+
+    if (!finalAttempt) {
+        const uint16_t quality = computeCalibrationQuality((uint32_t)validCount, stats);
+        if (quality < kEarlyFinishQuality) {
+            return false;
+        }
+        logEvent("CALIB", "early_finish");
+    }
+
+    const float avgX = finalSumX / (float)validCount;
+    const float avgY = finalSumY / (float)validCount;
+    const float avgZ = finalSumZ / (float)validCount;
+
+    logEvent("CALIB", "before_success");
+    calibrationSuccess(avgX, avgY, avgZ, (uint16_t)validCount, stats);
+    logEvent("CALIB", "after_success");
+    return true;
+}
+
 // ── Temporary Calibration Results retrieval ─────────────────────────────────
 float getLastCalibratedX() { return s_lastCalibratedX; }
 float getLastCalibratedY() { return s_lastCalibratedY; }
@@ -317,6 +407,22 @@ void initCalibration() {
 
 void handleCalibration() {
     const unsigned long currentMillis = millis();
+
+    if (s_pendingPersistTicket != 0u) {
+        bool success = false;
+        uint32_t totalMs = 0;
+        uint32_t flashMs = 0;
+        if (storageGetDeferredPersistResult(s_pendingPersistTicket, &success, &totalMs, &flashMs)) {
+            notifyCalibrationPersisted(s_pendingPersistProfileId, success, totalMs, flashMs);
+            s_rttTiming.print("[TIMING] calibration durable save: ");
+            s_rttTiming.print(totalMs);
+            s_rttTiming.print(" ms total, ");
+            s_rttTiming.print(flashMs);
+            s_rttTiming.println(" ms flash");
+            s_pendingPersistTicket = 0u;
+            s_pendingPersistProfileId = 0u;
+        }
+    }
 
     if (pendingCancel) {
         pendingCancel = false;
@@ -406,10 +512,17 @@ void handleCalibration() {
 #endif
             }
 
-            if (totalSamples >= kEarlyFailMinSamples && (totalSamples % 10) == 0) {
-                CalibrationStats earlyStats = calculateCalibrationStats(totalSamples);
-                if (calibrationStatsTooUnstable(earlyStats, kEarlyFailStdDevLimit)) {
+            if (totalSamples >= kEarlyFailMinSamples &&
+                (totalSamples % kStatsCheckEverySamples) == 0) {
+                CalibrationStats runningStats = calculateCalibrationStats(totalSamples);
+                if (calibrationStatsTooUnstable(runningStats, kEarlyFailStdDevLimit)) {
                     calibrationFail("MOVEMENT_TOO_HIGH");
+                    return;
+                }
+                // Adaptive early finish: complete now if the result would
+                // already be Excellent (see tryFinalizeCalibration).
+                if (totalSamples >= kEarlyFinishMinSamples &&
+                    tryFinalizeCalibration(false, runningStats)) {
                     return;
                 }
             }
@@ -433,51 +546,7 @@ void handleCalibration() {
                        String(finalStats.stdDevX, 2).c_str(), String(finalStats.stdDevY, 2).c_str(), String(finalStats.stdDevZ, 2).c_str());
 #endif
 
-            // Safety limit: if standard deviation is too high, posture is too unstable
-            if (calibrationStatsTooUnstable(finalStats, kFinalStdDevLimit)) {
-                calibrationFail("MOVEMENT_TOO_HIGH");
-                return;
-            }
-
-            // Pass 3: Reject outliers (mean +/- 2*sigma) and compute final average
-            float finalSumX = 0, finalSumY = 0, finalSumZ = 0;
-            int validCount = 0;
-
-            for (int i = 0; i < totalSamples; i++) {
-                // If stdDev is near zero, accept all (protect from floating point edge case)
-                bool okX = (finalStats.stdDevX < 0.01f) || (fabsf(samplesX[i] - finalStats.meanX) <= 2.0f * finalStats.stdDevX);
-                bool okY = (finalStats.stdDevY < 0.01f) || (fabsf(samplesY[i] - finalStats.meanY) <= 2.0f * finalStats.stdDevY);
-                bool okZ = (finalStats.stdDevZ < 0.01f) || (fabsf(samplesZ[i] - finalStats.meanZ) <= 2.0f * finalStats.stdDevZ);
-
-                if (okX && okY && okZ) {
-                    finalSumX += samplesX[i];
-                    finalSumY += samplesY[i];
-                    finalSumZ += samplesZ[i];
-                    validCount++;
-                } else {
-#if ALIGN_RTT_CALIB_VERBOSE
-                    rtt.printf("CALIB: Outlier Sample #%d rejected - raw[%s, %s, %s]\n",
-                               i + 1, String(samplesX[i], 2).c_str(), String(samplesY[i], 2).c_str(), String(samplesZ[i], 2).c_str());
-#endif
-                }
-            }
-
-#if ALIGN_RTT_CALIB_VERBOSE
-            rtt.printf("CALIB RESULTS: Valid samples=%d/%d\n", validCount, totalSamples);
-#endif
-
-            if (validCount < MIN_VALID_SAMPLES) {
-                calibrationFail("MOVEMENT_TOO_HIGH");
-                return;
-            }
-
-            const float avgX = finalSumX / (float)validCount;
-            const float avgY = finalSumY / (float)validCount;
-            const float avgZ = finalSumZ / (float)validCount;
-
-            logEvent("CALIB", "before_success");
-            calibrationSuccess(avgX, avgY, avgZ, (uint16_t)validCount);
-            logEvent("CALIB", "after_success");
+            tryFinalizeCalibration(true, finalStats);
             return;
         }
     }

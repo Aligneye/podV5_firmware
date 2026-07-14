@@ -162,7 +162,7 @@ bool addCalibrationProfile(const char* name) {
         advanceOverwriteIndex(newIndex);
     }
 
-    storageCommitBatchDeferred();
+    (void)storageCommitBatchDeferred();
 
     setPostureOrigin3D(p.refX, p.refY, p.refZ);
     setOrientationLabel(p.name);
