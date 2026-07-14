@@ -46,6 +46,9 @@ struct TherapyEventReadResult {
 };
 
 void session_log_init();
+// Flushes queued log appends from the main loop so session-end writes never
+// block a button press. Call every loop iteration.
+void session_log_loop();
 void session_log_append(const StoredSession& s);
 int  session_log_count_unsent();
 bool session_log_get_unsent(int index, StoredSession& out, int& fileIndex);

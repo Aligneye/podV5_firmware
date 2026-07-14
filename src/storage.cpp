@@ -2,13 +2,15 @@
 #include "calibration.h"
 #include "session_log.h"
 #include "therapy.h"
-#include "nrf.h"
 #include "rtt_debugger.h"
 #include <RTTStream.h>
 #include <string.h>
 #include <math.h>
 
 extern RTTStream rtt;
+// Real RTT stream for flash-write timing measurements; the `rtt` macro below
+// silences all other non-BLE output in this file.
+static RTTStream& s_rttTiming = rtt;
 static AlignRttSilencer s_nonBleRtt;
 #define rtt s_nonBleRtt
 
@@ -22,28 +24,22 @@ using namespace Adafruit_LittleFS_Namespace;
 #endif
 
 // ── Flash layout ───────────────────────────────────────────────────────────
-// nRF52832 has 512 KB flash in 4 KB (0x1000) pages. We reserve the last
-// page (0x7F000-0x7FFFF) as a dedicated settings page. Linker scripts for
-// this project place the application well below this address.
-static constexpr uint32_t SETTINGS_PAGE_ADDR = 0x00073000UL;
+// nRF52832, 512 KB flash in 4 KB (0x1000) pages:
+//   0x00000-0x25FFF  MBR + SoftDevice S132
+//   0x26000-...      Application image
+//   ...    -0x6CFFF  Free (DFU dual-bank staging area during OTA — do not use)
+//   0x6D000-0x73FFF  Internal LittleFS, 28 KB (framework-fixed; all files)
+//   0x74000-0x7EFFF  Bootloader
+//   0x7F000-0x7FFFF  Firmware signature
+//
+// Historical note: firmware up to v1.2.0 used 0x73000 as a raw NVMC settings
+// page — but that address is the LAST PAGE OF THE LITTLEFS REGION, so raw
+// erases there could corrupt the live filesystem and trigger a full reformat
+// (total data loss). All raw-page settings code has been removed; settings
+// persist via the filesystem only. Never reserve addresses inside
+// framework-owned regions.
 static constexpr uint32_t SETTINGS_MAGIC     = 0x414C4733UL;  // "ALG3"
 static constexpr uint16_t SETTINGS_VERSION   = 5u;
-
-struct PersistedSettingsV1 {
-    uint32_t magic;
-    uint16_t version;
-    uint8_t  therapySubModeIndex;
-    uint8_t  reserved;
-};
-
-struct PersistedSettingsV3 {
-    uint32_t magic;
-    uint16_t version;
-    uint8_t  trainingDelay;
-    uint8_t  reserved;
-    float     calY;
-    float     calZ;
-};
 
 struct PersistedSettings {
     uint32_t magic;
@@ -83,7 +79,6 @@ static const char* PROFILE_STORE_PATH = "/profiles.dat";
 static const char* PROFILE_STORE_TMP_PATH = "/profiles.tmp";
 static const char* SETTINGS_FILE_PATH = "/sys_settings.dat";
 static const char* SETTINGS_TMP_PATH  = "/sys_settings.tmp";
-static bool s_storageInitialized = false;
 
 struct ProfileStore {
     uint32_t magic;
@@ -129,47 +124,10 @@ static uint32_t computeSettingsCrc(const PersistedSettings& settings) {
 }
 
 #if PROFILE_STORE_HAS_FS
-static bool writeProfileStore() {
-    InternalFS.begin();
-    InternalFS.remove(PROFILE_STORE_TMP_PATH);
-
-    File tmp = InternalFS.open(PROFILE_STORE_TMP_PATH, FILE_O_WRITE);
-    if (!tmp) return false;
-
-    ProfileStore store{};
-    store.magic = PROFILE_STORE_MAGIC;
-    store.profileCount = g_settings.profileCount;
-    store.activeProfileIndex = decodeStoredActiveProfileIndex();
-    store.reserved[0] = decodeStoredNextOverwriteIndex();
-    memcpy(store.profiles, g_settings.profiles, sizeof(store.profiles));
-
-    const size_t written = tmp.write((uint8_t*)&store, sizeof(store));
-    tmp.flush();
-    tmp.close();
-
-    if (written != sizeof(store)) {
-        InternalFS.remove(PROFILE_STORE_TMP_PATH);
-        return false;
-    }
-
-    InternalFS.remove(PROFILE_STORE_PATH);
-    if (InternalFS.rename(PROFILE_STORE_TMP_PATH, PROFILE_STORE_PATH)) {
-        return true;
-    }
-
-    File direct = InternalFS.open(PROFILE_STORE_PATH, FILE_O_WRITE);
-    if (!direct) {
-        InternalFS.remove(PROFILE_STORE_TMP_PATH);
-        return false;
-    }
-
-    const size_t written2 = direct.write((uint8_t*)&store, sizeof(store));
-    direct.flush();
-    direct.close();
-    InternalFS.remove(PROFILE_STORE_TMP_PATH);
-    return written2 == sizeof(store);
-}
-
+// /profiles.dat is legacy: everything it held is a subset of the settings
+// file, which is now the single source of truth. The file is only read once
+// at boot to migrate devices upgrading from firmware that still wrote it
+// (where it could be newer than the settings file), then deleted.
 static bool readProfileStore(ProfileStore& store) {
     InternalFS.begin();
     File file = InternalFS.open(PROFILE_STORE_PATH, FILE_O_READ);
@@ -185,88 +143,34 @@ static bool readProfileStore(ProfileStore& store) {
 }
 #endif
 
-// ── NVMC helpers ───────────────────────────────────────────────────────────
-static inline void nvmcWaitReady() {
-    while (NRF_NVMC->READY == NVMC_READY_READY_Busy) { /* spin */ }
-}
-
-static void nvmcErasePage(uint32_t addr) {
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Een;
-    nvmcWaitReady();
-    NRF_NVMC->ERASEPAGE = addr;
-    nvmcWaitReady();
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren;
-    nvmcWaitReady();
-}
-
-static void nvmcWriteWords(uint32_t addr, const uint32_t* src, uint32_t count) {
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen;
-    nvmcWaitReady();
-    volatile uint32_t* dst = reinterpret_cast<volatile uint32_t*>(addr);
-    for (uint32_t i = 0; i < count; i++) {
-        dst[i] = src[i];
-        nvmcWaitReady();
-    }
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren;
-    nvmcWaitReady();
-}
-
 // ── Persist / load ─────────────────────────────────────────────────────────
 static bool persist() {
 #if PROFILE_STORE_HAS_FS
+    const uint32_t t0 = millis();
     InternalFS.begin();
-    InternalFS.remove(SETTINGS_TMP_PATH);
-    File tmp = InternalFS.open(SETTINGS_TMP_PATH, FILE_O_WRITE);
-    if (tmp) {
+    File file = InternalFS.open(SETTINGS_FILE_PATH, FILE_O_WRITE);
+    if (file) {
         g_settings.crc = computeSettingsCrc(g_settings);
-        size_t written = tmp.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
-        tmp.flush();
-        tmp.close();
+        file.seek(0);  // FILE_O_WRITE opens positioned at end of file
+        size_t written = file.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
+        file.truncate(sizeof(g_settings));
+        file.close();
+        s_rttTiming.print("[TIMING] settings persist: ");
+        s_rttTiming.print(millis() - t0);
+        s_rttTiming.println(" ms");
         if (written == sizeof(g_settings)) {
-            InternalFS.remove(SETTINGS_FILE_PATH);
-            if (InternalFS.rename(SETTINGS_TMP_PATH, SETTINGS_FILE_PATH)) {
-                rtt.println("[STORAGE] Settings persisted to FS successfully");
-                return true;
-            }
-            
-            // Fallback direct write if rename fails
-            File direct = InternalFS.open(SETTINGS_FILE_PATH, FILE_O_WRITE);
-            if (direct) {
-                size_t written2 = direct.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
-                direct.flush();
-                direct.close();
-                InternalFS.remove(SETTINGS_TMP_PATH);
-                if (written2 == sizeof(g_settings)) {
-                    rtt.println("[STORAGE] Settings persisted to FS successfully via direct write");
-                    return true;
-                }
-            }
+            rtt.println("[STORAGE] Settings persisted to FS successfully");
+            return true;
         }
-        InternalFS.remove(SETTINGS_TMP_PATH);
     }
     rtt.println("[STORAGE] WARNING: FS persist failed");
 #endif
 
-    // Only allow NVMC fallback at boot time before storage setup completes.
-    // At runtime (BLE active, calibration running), direct NVMC flash writes are blocked to avoid CPU reset.
-    if (s_storageInitialized) {
-        rtt.println("[STORAGE] ERROR: FS persist failed; NVMC fallback blocked during active runtime");
-        return false;
-    }
-
-    // Pad struct to whole 32-bit words for NVMC word writes.
-    constexpr uint32_t kWordCount =
-        (sizeof(PersistedSettings) + 3u) / 4u;
-    uint32_t buffer[kWordCount] = {0};
-    g_settings.crc = computeSettingsCrc(g_settings);
-    memcpy(buffer, &g_settings, sizeof(g_settings));
-
-    noInterrupts();
-    nvmcErasePage(SETTINGS_PAGE_ADDR);
-    nvmcWriteWords(SETTINGS_PAGE_ADDR, buffer, kWordCount);
-    interrupts();
-    rtt.println("[STORAGE] Settings persisted to NVMC (boot-time)");
-    return true;
+    // No raw-page fallback (see flash layout note above) — a failed settings
+    // write must never escalate into losing every file on the device. RAM
+    // state stays authoritative and the next successful persist (or
+    // storageLoop() retry) heals flash.
+    return false;
 }
 
 static bool loadFromFlash() {
@@ -285,97 +189,76 @@ static bool loadFromFlash() {
                 return true;
             }
         }
-        rtt.println("[STORAGE] Invalid settings file on FS, falling back to NVMC");
+        rtt.println("[STORAGE] Invalid settings file on FS");
     }
 #endif
 
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(SETTINGS_PAGE_ADDR);
-    const uint32_t* magic = reinterpret_cast<const uint32_t*>(base);
-    if (*magic != SETTINGS_MAGIC) return false;
+    return false;
+}
 
-    const uint16_t* ver = reinterpret_cast<const uint16_t*>(base + 4);
-    if (*ver == 1u || *ver == 2u || *ver == 3u) {
-        uint8_t trainingDelay = (uint8_t)TRAIN_INSTANT;
-        float calY = 6.75f;
-        float calZ = 6.75f;
+// ── Write batching & deferred persist ──────────────────────────────────────
+// A batch defers the flash write so a multi-step update (e.g. saving a new
+// calibration profile + active index + default id) costs one settings commit
+// instead of one per setter. Setters still update g_settings immediately;
+// only the flash write is deferred until the batch is committed.
+//
+// A deferred persist pushes the commit out of the calling code path entirely:
+// it runs from storageLoop() in the main loop, so time-critical feedback
+// (BLE notify, success haptic) is never blocked behind the flash write.
+// Because persist() always writes the full settings struct, any later
+// successful persist heals an earlier failed or pending one.
+static uint8_t s_batchDepth = 0;
+static bool s_batchSettingsDirty = false;
+static bool s_deferredPersistPending = false;
+static uint32_t s_deferredPersistDueMs = 0;
+static uint8_t s_deferredPersistRetries = 0;
 
-        if (*ver == 2u || *ver == 3u) {
-            const PersistedSettingsV3* oldSettings =
-                reinterpret_cast<const PersistedSettingsV3*>(SETTINGS_PAGE_ADDR);
-            trainingDelay = oldSettings->trainingDelay;
-            calY = oldSettings->calY;
-            calZ = oldSettings->calZ;
-        }
-
-        if (fabsf(calY) < 0.1f && fabsf(calZ) < 0.1f) {
-            calY = 6.75f;
-            calZ = 6.75f;
-        }
-
-        // Reconstruct refX using the heuristic check for gravity units (calY^2 + calZ^2 < 2.0f)
-        float magSq = calY * calY + calZ * calZ;
-        float refX = 0.0f;
-        if (magSq < 2.0f) {
-            // G-units
-            float diff = 1.0f - magSq;
-            refX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
-        } else {
-            // m/s^2
-            float diff = (9.80665f * 9.80665f) - magSq;
-            refX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
-        }
-
-        g_settings.magic = SETTINGS_MAGIC;
-        g_settings.version = SETTINGS_VERSION;
-        g_settings.trainingDelay = trainingDelay;
-        g_settings.reserved = 0;
-        g_settings.calY = calY;
-        g_settings.calZ = calZ;
-        g_settings.profileCount = 1;
-        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
-        g_settings.nextProfileId = 2u;
-        g_settings.defaultProfileId = 0u;
-
-        g_settings.profiles[0].id = 1u;
-        strncpy(g_settings.profiles[0].name, "Default Vertical", sizeof(g_settings.profiles[0].name) - 1);
-        g_settings.profiles[0].name[sizeof(g_settings.profiles[0].name) - 1] = '\0';
-        g_settings.profiles[0].refX = refX;
-        g_settings.profiles[0].refY = calY;
-        g_settings.profiles[0].refZ = calZ;
-        g_settings.profiles[0].createdAtEpoch = 0;
-        g_settings.profiles[0].sampleCount = 0;
-        g_settings.profiles[0].stabilityScore = 0.0f;
-        g_settings.profiles[0].valid = 1;
-
-        g_settings.crc = 0u;
-        persist();  // migrate flash layout to v4
-        rtt.println("[STORAGE] Settings migrated from legacy NVMC (v1-v3)");
+static bool persistSettings() {
+    if (s_batchDepth > 0) {
+        s_batchSettingsDirty = true;
         return true;
     }
-    if (*ver != SETTINGS_VERSION) return false;
+    return persist();
+}
 
-    const PersistedSettings* flash =
-        reinterpret_cast<const PersistedSettings*>(SETTINGS_PAGE_ADDR);
-    if (flash->trainingDelay < (uint8_t)TRAIN_DELAYED ||
-        flash->trainingDelay > (uint8_t)TRAIN_INSTANT) {
-        return false;
-    }
+void storageBeginBatch() {
+    s_batchDepth++;
+}
 
-    g_settings = *flash;
-    if (g_settings.nextProfileId == 0u) g_settings.nextProfileId = 1u;
-    if (fabsf(g_settings.calY) < 0.1f && fabsf(g_settings.calZ) < 0.1f) {
-        g_settings.calY = 6.75f;
-        g_settings.calZ = 6.75f;
-    }
-    const uint32_t expectedCrc = computeSettingsCrc(g_settings);
-    if (g_settings.crc != 0u && g_settings.crc != expectedCrc) {
-        return false;
-    }
+bool storageCommitBatch() {
+    if (s_batchDepth == 0) return true;
+    if (--s_batchDepth > 0) return true;
+    if (!s_batchSettingsDirty) return true;
+    s_batchSettingsDirty = false;
+    return persist();
+}
 
-    // We loaded it from NVMC successfully, now save it to FS for future accesses.
-    rtt.println("[STORAGE] Settings loaded from NVMC, saving to FS");
-    persist();
-    return true;
+void storageCommitBatchDeferred() {
+    if (s_batchDepth == 0) return;
+    if (--s_batchDepth > 0) return;
+    if (!s_batchSettingsDirty) return;
+    s_batchSettingsDirty = false;
+    s_deferredPersistPending = true;
+    // Small grace period so the immediate post-save BLE traffic (result
+    // notify, app's GET_PROFILES round-trip) isn't competing with flash ops
+    // for radio-free slots.
+    s_deferredPersistDueMs = millis() + 150u;
+    s_deferredPersistRetries = 0;
+}
+
+void storageLoop() {
+    if (!s_deferredPersistPending) return;
+    if ((int32_t)(millis() - s_deferredPersistDueMs) < 0) return;
+    if (persist()) {
+        s_deferredPersistPending = false;
+        return;
+    }
+    if (++s_deferredPersistRetries >= 5u) {
+        s_deferredPersistPending = false;
+        s_rttTiming.println("[STORAGE] ERROR: deferred persist gave up after retries");
+        return;
+    }
+    s_deferredPersistDueMs = millis() + 1000u;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -388,7 +271,30 @@ void storageSetup() {
         logEvent("STORAGE", "empty_defaults");
         persist();
     }
-    s_storageInitialized = true;
+#if PROFILE_STORE_HAS_FS
+    // One-time migration from older firmware: /profiles.dat could be newer
+    // than the settings file (old code skipped the settings persist when the
+    // profile store write succeeded), so merge it in, persist once, then
+    // delete it. Afterwards the settings file is the single source of truth.
+    ProfileStore store{};
+    if (readProfileStore(store)) {
+        g_settings.profileCount = store.profileCount;
+        memcpy(g_settings.profiles, store.profiles, store.profileCount * sizeof(OrientationProfile));
+        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+        if (store.activeProfileIndex >= 0 && store.activeProfileIndex < (int8_t)store.profileCount) {
+            g_settings.reserved2[0] = (uint8_t)(store.activeProfileIndex + 1);
+        }
+        g_settings.reserved2[1] = (store.reserved[0] < ACTIVE_PROFILE_MAX_STORED) ? store.reserved[0] : NEXT_OVERWRITE_DEFAULT;
+        if (persist()) {
+            InternalFS.remove(PROFILE_STORE_PATH);
+            logEvent("STORAGE", "profile_store_migrated");
+        }
+    }
+    // One-time cleanup of temp files left by older firmware's temp+rename
+    // persist pattern (no longer used).
+    InternalFS.remove(PROFILE_STORE_TMP_PATH);
+    InternalFS.remove(SETTINGS_TMP_PATH);
+#endif
     session_log_init();
 }
 
@@ -399,7 +305,7 @@ bool saveTrainingDelay(TrainingDelay delay) {
     }
     if (g_settings.trainingDelay == d) return true;
     g_settings.trainingDelay = d;
-    return persist();
+    return persistSettings();
 }
 
 TrainingDelay loadTrainingDelay() {
@@ -436,7 +342,7 @@ bool storageSaveCalibration(float y, float z) {
     if (g_settings.calY == y && g_settings.calZ == z) return true;
     g_settings.calY = y;
     g_settings.calZ = z;
-    bool ok = persist();
+    bool ok = persistSettings();
     logEvent("STORAGE", "saved_posture_calibration");
     return ok;
 }
@@ -450,30 +356,15 @@ void storageFactoryReset() {
     g_settings.nextProfileId = 1u;
     g_settings.defaultProfileId = 0u;
     memset(g_settings.profiles, 0, sizeof(g_settings.profiles));
-    persist();
+    persistSettings();
     logEvent("STORAGE", "factory_reset");
 }
 
 bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
     if (!profiles || !count) return false;
 
-#if PROFILE_STORE_HAS_FS
-    ProfileStore store{};
-    if (readProfileStore(store)) {
-        g_settings.profileCount = store.profileCount;
-        memcpy(g_settings.profiles, store.profiles, store.profileCount * sizeof(OrientationProfile));
-        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
-        if (store.activeProfileIndex >= 0 && store.activeProfileIndex < (int8_t)store.profileCount) {
-            g_settings.reserved2[0] = (uint8_t)(store.activeProfileIndex + 1);
-        }
-        g_settings.reserved2[1] = (store.reserved[0] < ACTIVE_PROFILE_MAX_STORED) ? store.reserved[0] : NEXT_OVERWRITE_DEFAULT;
-
-        *count = g_settings.profileCount;
-        memcpy(profiles, g_settings.profiles, g_settings.profileCount * sizeof(OrientationProfile));
-        return true;
-    }
-#endif
-
+    // Profiles live in the settings struct; any legacy /profiles.dat was
+    // already merged into g_settings during storageSetup().
     *count = g_settings.profileCount;
     if (g_settings.profileCount > 8) {
         g_settings.profileCount = 8;
@@ -499,11 +390,7 @@ bool storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
         g_settings.calZ = g_settings.profiles[0].refZ;
     }
 
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return true;
-#endif
-
-    return persist();
+    return persistSettings();
 }
 
 int8_t storageLoadActiveProfileIndex() {
@@ -518,10 +405,7 @@ bool storageSaveActiveProfileIndex(int8_t index) {
     if (g_settings.reserved2[0] == stored) return true;
 
     g_settings.reserved2[0] = stored;
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return true;
-#endif
-    return persist();
+    return persistSettings();
 }
 
 uint8_t storageLoadNextProfileOverwriteIndex() {
@@ -533,10 +417,7 @@ bool storageSaveNextProfileOverwriteIndex(uint8_t index) {
     if (g_settings.reserved2[1] == index) return true;
 
     g_settings.reserved2[1] = index;
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return true;
-#endif
-    return persist();
+    return persistSettings();
 }
 
 uint32_t storageLoadDefaultProfileId() {
@@ -546,7 +427,7 @@ uint32_t storageLoadDefaultProfileId() {
 bool storageSaveDefaultProfileId(uint32_t id) {
     if (g_settings.defaultProfileId == id) return true;
     g_settings.defaultProfileId = id;
-    return persist();
+    return persistSettings();
 }
 
 uint32_t storageLoadNextProfileId() {
@@ -557,6 +438,6 @@ bool storageSaveNextProfileId(uint32_t id) {
     if (id == 0u) id = 1u;
     if (g_settings.nextProfileId == id) return true;
     g_settings.nextProfileId = id;
-    return persist();
+    return persistSettings();
 }
 

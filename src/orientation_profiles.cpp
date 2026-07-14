@@ -125,17 +125,18 @@ bool addCalibrationProfile(const char* name) {
     const bool replacing = (s_profileCount >= 8u);
     const uint8_t newIndex = replacing ? nextOverwriteIndex() : s_profileCount;
 
-    OrientationProfile backup[8];
-    memcpy(backup, s_profiles, sizeof(s_profiles));
-    const uint8_t backupCount = s_profileCount;
-    const uint32_t backupActiveId = s_activeProfileId;
-    const uint32_t backupDefaultId = s_defaultProfileId;
-
     OrientationProfile& p = s_profiles[newIndex];
     const uint32_t replacedId = replacing ? p.id : 0u;
     if (!replacing) {
         s_profileCount++;
     }
+
+    // Batch all storage updates into a single flash commit and hand it to
+    // storageLoop() — the eager per-setter writes used to stall the main loop
+    // for seconds after a successful calibration (each flash op waits on
+    // SoftDevice radio slots). RAM state is authoritative immediately; the
+    // flash write happens right after the success feedback goes out.
+    storageBeginBatch();
 
     assignProfileDefaults(p);
     p.id = nextProfileId();
@@ -146,20 +147,12 @@ bool addCalibrationProfile(const char* name) {
     p.createdAtEpoch = millis() / 1000UL;
     p.sampleCount = 0;
     p.stabilityScore = 0.0f;
-    if (!storageSaveProfiles(s_profiles, s_profileCount)) {
-        memcpy(s_profiles, backup, sizeof(s_profiles));
-        s_profileCount = backupCount;
-        s_activeProfileId = backupActiveId;
-        s_defaultProfileId = backupDefaultId;
-        return false;
-    }
+    storageSaveProfiles(s_profiles, s_profileCount);
 
     // Activate the newly created profile immediately so the running device uses it.
     // The storage layer persists active profiles by index, not by profile id.
     s_activeProfileId = p.id;
     storageSaveActiveProfileIndex((int8_t)newIndex);
-    setPostureOrigin3D(p.refX, p.refY, p.refZ);
-    setOrientationLabel(p.name);
 
     if (s_defaultProfileId == 0u || s_defaultProfileId == replacedId) {
         s_defaultProfileId = p.id;
@@ -168,6 +161,11 @@ bool addCalibrationProfile(const char* name) {
     if (replacing) {
         advanceOverwriteIndex(newIndex);
     }
+
+    storageCommitBatchDeferred();
+
+    setPostureOrigin3D(p.refX, p.refY, p.refZ);
+    setOrientationLabel(p.name);
     return true;
 }
 
@@ -225,10 +223,12 @@ void clearCalibrationProfiles() {
     s_profileCount = 0;
     s_activeProfileId = 0;
     s_defaultProfileId = 0;
+    storageBeginBatch();
     storageSaveProfiles(s_profiles, s_profileCount);
     storageSaveActiveProfileIndex(-1);
     storageSaveNextProfileOverwriteIndex(0u);
     storageSaveDefaultProfileId(0u);
+    storageCommitBatch();
     setPostureOrigin(6.75f, 6.75f);
     setOrientationLabel("DEFAULT");
 }

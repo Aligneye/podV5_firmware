@@ -4,6 +4,9 @@
 #include <RTTStream.h>
 
 extern RTTStream rtt;
+// Real RTT stream for flash-write timing measurements; the `rtt` macro below
+// silences all other non-BLE output in this file.
+static RTTStream& s_rttTiming = rtt;
 static AlignRttSilencer s_nonBleRtt;
 #define rtt s_nonBleRtt
 
@@ -21,53 +24,155 @@ namespace {
 constexpr const char* kTempPath    = "/sessions.tmp";
 constexpr const char* kEvTempPath  = "/sess_ev.tmp";
 
+// /sessions.log is an append-only log. A session end appends one small
+// record; a sync acknowledgement appends a tiny "sent" marker. The file is
+// rewritten compactly only when sent sessions are purged after a sync or
+// when it outgrows kLogCompactBytes — never on the session-end hot path.
+// (The legacy /sessions.dat whole-array file is migrated once at boot.)
+constexpr const char* kLogPath = "/sessions.log";
+constexpr uint8_t  kRecSession     = 0xA5;
+constexpr uint8_t  kRecSentMark    = 0x5A;
+constexpr uint32_t kLogCompactBytes = 4096u;
+constexpr uint32_t kFlushDelayMs    = 400u;
+
 StoredSession g_sessions[MAX_SESSIONS];
 int           g_count    = 0;
 bool          g_ready    = false;
 
+// Pending appends are buffered in RAM and flushed from session_log_loop(),
+// so a session ending on a button press never blocks on flash.
+uint8_t  g_pendingBuf[192];
+size_t   g_pendingLen     = 0;
+uint32_t g_pendingSinceMs = 0;
+
+int findOldestSentSlot() {
+    for (int i = 0; i < g_count; i++) {
+        if (g_sessions[i].sent) return i;
+    }
+    return -1;
+}
+
+void removeSlot(int idx) {
+    if (idx < 0 || idx >= g_count) return;
+    for (int i = idx; i < g_count - 1; i++) {
+        g_sessions[i] = g_sessions[i + 1];
+    }
+    g_count--;
+}
+
+void addSessionToRam(const StoredSession& s) {
+    if (g_count >= MAX_SESSIONS) {
+        int victim = findOldestSentSlot();
+        // All unsent: sacrifice the oldest so the newest session is kept
+        // (the old code dropped the incoming session instead).
+        if (victim < 0) victim = 0;
+        removeSlot(victim);
+    }
+    g_sessions[g_count++] = s;
+}
+
 #if SESSION_LOG_HAS_FS
-bool persistSessions() {
-    InternalFS.remove(kTempPath);
+// Rebuild RAM state by replaying the append log. Session records are added
+// in order (evicting per policy if over cap); sent markers flip the flag on
+// matching sessions. A torn/unknown record ends the replay — everything
+// before it is intact because LittleFS commits appends atomically on close.
+bool replayLog() {
+    File f = InternalFS.open(kLogPath, FILE_O_READ);
+    if (!f) return false;
 
-    File tmp = InternalFS.open(kTempPath, FILE_O_WRITE);
-    if (!tmp) return false;
+    while (true) {
+        uint8_t kind = 0;
+        if (f.read(&kind, 1) != 1) break;
+        if (kind == kRecSession) {
+            StoredSession s{};
+            if (f.read((uint8_t*)&s, sizeof(s)) != (int)sizeof(s)) break;
+            if (s.type != SESSION_TYPE_POSTURE && s.type != SESSION_TYPE_THERAPY) break;
+            addSessionToRam(s);
+        } else if (kind == kRecSentMark) {
+            uint32_t ts = 0;
+            if (f.read((uint8_t*)&ts, sizeof(ts)) != (int)sizeof(ts)) break;
+            for (int i = 0; i < g_count; i++) {
+                if (g_sessions[i].start_ts == ts) g_sessions[i].sent = true;
+            }
+        } else {
+            break;
+        }
+    }
+    f.close();
+    return true;
+}
 
-    size_t bytes = (size_t)g_count * sizeof(StoredSession);
-    size_t written = 0;
-    if (g_count > 0) {
-        written = tmp.write((uint8_t*)g_sessions, bytes);
-    }
-    tmp.flush();
-    tmp.close();
+// Rewrite the log as a compact snapshot of RAM state (in-place overwrite;
+// LittleFS keeps the old contents valid until close() commits). Runs only
+// after sync purges or when the log outgrows kLogCompactBytes.
+bool rewriteLogCompact() {
+    const uint32_t t0 = millis();
+    g_pendingLen = 0;  // snapshot supersedes any queued records
 
-    if (written != bytes) {
-        InternalFS.remove(kTempPath);
-        return false;
-    }
+    File f = InternalFS.open(kLogPath, FILE_O_WRITE);
+    if (!f) return false;
 
-    InternalFS.remove(SESSION_FILE);
-    if (InternalFS.rename(kTempPath, SESSION_FILE)) {
-        return true;
+    f.seek(0);  // FILE_O_WRITE opens positioned at end of file
+    size_t total = 0;
+    bool ok = true;
+    for (int i = 0; i < g_count && ok; i++) {
+        ok = f.write(&kRecSession, 1) == 1 &&
+             f.write((uint8_t*)&g_sessions[i], sizeof(StoredSession)) == sizeof(StoredSession);
+        total += 1 + sizeof(StoredSession);
     }
+    f.truncate(ok ? total : 0);
+    f.close();
 
-    File direct = InternalFS.open(SESSION_FILE, FILE_O_WRITE);
-    if (!direct) {
-        InternalFS.remove(kTempPath);
-        return false;
+    s_rttTiming.print("[TIMING] session log compact: ");
+    s_rttTiming.print(millis() - t0);
+    s_rttTiming.println(" ms");
+    return ok;
+}
+
+void flushPending() {
+    if (g_pendingLen == 0) return;
+    const uint32_t t0 = millis();
+
+    File f = InternalFS.open(kLogPath, FILE_O_WRITE);  // positioned at end
+    if (!f) return;  // keep pending; retried from session_log_loop()
+
+    const size_t written = f.write(g_pendingBuf, g_pendingLen);
+    const uint32_t logSize = f.size();
+    f.close();
+
+    if (written != g_pendingLen) {
+        // Partial append would leave a torn tail; rebuild from RAM instead.
+        rewriteLogCompact();
+        return;
     }
-    size_t written2 = 0;
-    if (g_count > 0) {
-        written2 = direct.write((uint8_t*)g_sessions, bytes);
+    g_pendingLen = 0;
+
+    s_rttTiming.print("[TIMING] session log append: ");
+    s_rttTiming.print(millis() - t0);
+    s_rttTiming.println(" ms");
+
+    if (logSize > kLogCompactBytes) {
+        rewriteLogCompact();
     }
-    direct.flush();
-    direct.close();
-    InternalFS.remove(kTempPath);
-    return written2 == bytes;
+}
+
+void queueRecord(uint8_t kind, const void* payload, size_t len) {
+    if (g_pendingLen + 1 + len > sizeof(g_pendingBuf)) {
+        flushPending();  // synchronous fallback if the queue overflows
+        if (g_pendingLen + 1 + len > sizeof(g_pendingBuf)) return;
+    }
+    if (g_pendingLen == 0) g_pendingSinceMs = millis();
+    g_pendingBuf[g_pendingLen++] = kind;
+    memcpy(g_pendingBuf + g_pendingLen, payload, len);
+    g_pendingLen += len;
 }
 
 void loadFromDisk() {
     g_count = 0;
 
+    if (replayLog()) return;
+
+    // One-time migration from the legacy whole-array /sessions.dat.
     File file = InternalFS.open(SESSION_FILE, FILE_O_READ);
     if (!file) return;
 
@@ -81,6 +186,11 @@ void loadFromDisk() {
         g_sessions[g_count++] = tmp;
     }
     file.close();
+
+    if (rewriteLogCompact()) {
+        InternalFS.remove(SESSION_FILE);
+    }
+    InternalFS.remove(kTempPath);  // stale temp from the old rewrite pattern
 }
 
 bool appendToEventFile(const uint8_t* data, size_t len) {
@@ -206,21 +316,6 @@ void ensureReady() {
     g_ready = true;
 }
 
-int findOldestSentSlot() {
-    for (int i = 0; i < g_count; i++) {
-        if (g_sessions[i].sent) return i;
-    }
-    return -1;
-}
-
-void removeSlot(int idx) {
-    if (idx < 0 || idx >= g_count) return;
-    for (int i = idx; i < g_count - 1; i++) {
-        g_sessions[i] = g_sessions[i + 1];
-    }
-    g_count--;
-}
-
 }  // namespace
 
 void session_log_init() {
@@ -230,18 +325,14 @@ void session_log_init() {
 void session_log_append(const StoredSession& s) {
     ensureReady();
 
-    if (g_count >= MAX_SESSIONS) {
-        int victim = findOldestSentSlot();
-        if (victim < 0) return;
-        removeSlot(victim);
-    }
-
     StoredSession copy = s;
     copy.sent = false;
-    g_sessions[g_count++] = copy;
+    addSessionToRam(copy);
 
 #if SESSION_LOG_HAS_FS
-    persistSessions();
+    // Queued and flushed from session_log_loop() shortly after — the mode
+    // switch that ended this session never waits on flash.
+    queueRecord(kRecSession, &copy, sizeof(copy));
 #endif
 }
 
@@ -278,7 +369,13 @@ void session_log_mark_sent(int fileIndex) {
 
     g_sessions[fileIndex].sent = true;
 #if SESSION_LOG_HAS_FS
-    persistSessions();
+    // Durable as a tiny marker append. Sessions with start_ts == 0 can't be
+    // identified in the log; they simply get re-sent after a reboot and the
+    // app-side upsert dedupes.
+    if (g_sessions[fileIndex].start_ts != 0) {
+        const uint32_t ts = g_sessions[fileIndex].start_ts;
+        queueRecord(kRecSentMark, &ts, sizeof(ts));
+    }
 #endif
 }
 
@@ -299,8 +396,18 @@ void session_log_purge_sent() {
 
     g_count = write;
 #if SESSION_LOG_HAS_FS
-    persistSessions();
+    // Runs at sync end, when nearly everything is sent — the compacted log
+    // is close to empty, so this rewrite is at its cheapest.
+    rewriteLogCompact();
     purgeOrphanedEvents();
+#endif
+}
+
+void session_log_loop() {
+#if SESSION_LOG_HAS_FS
+    if (!g_ready || g_pendingLen == 0) return;
+    if (millis() - g_pendingSinceMs < kFlushDelayMs) return;
+    flushPending();
 #endif
 }
 
