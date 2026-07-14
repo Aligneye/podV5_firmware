@@ -12,6 +12,7 @@
 #include "motor.h"
 #include "sleep.h"
 #include "session_stats.h"
+#include "session_log.h"
 #include "rtt_debugger.h"
 
 RTTStream rtt;
@@ -49,6 +50,7 @@ void loop() {
     bluetoothLoop();
     calibrationLoop();
     storageLoop();
+    session_log_loop();
     inactivityTimerLoop();
     rttDebuggerLoop();
     if (currentMode == MODE_IDLE || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
