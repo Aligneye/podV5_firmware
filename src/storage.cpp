@@ -132,33 +132,10 @@ static uint32_t computeSettingsCrc(const PersistedSettings& settings) {
 }
 
 #if PROFILE_STORE_HAS_FS
-// LittleFS commits file updates copy-on-write on close(): the previous file
-// contents stay valid until the new data is fully committed, so an in-place
-// overwrite is brownout-safe without a temp-file + rename dance.
-static bool writeProfileStore() {
-    const uint32_t t0 = millis();
-    InternalFS.begin();
-
-    ProfileStore store{};
-    store.magic = PROFILE_STORE_MAGIC;
-    store.profileCount = g_settings.profileCount;
-    store.activeProfileIndex = decodeStoredActiveProfileIndex();
-    store.reserved[0] = decodeStoredNextOverwriteIndex();
-    memcpy(store.profiles, g_settings.profiles, sizeof(store.profiles));
-
-    File file = InternalFS.open(PROFILE_STORE_PATH, FILE_O_WRITE);
-    if (!file) return false;
-
-    file.seek(0);  // FILE_O_WRITE opens positioned at end of file
-    const size_t written = file.write((uint8_t*)&store, sizeof(store));
-    file.truncate(sizeof(store));
-    file.close();
-    s_rttTiming.print("[TIMING] profile store write: ");
-    s_rttTiming.print(millis() - t0);
-    s_rttTiming.println(" ms");
-    return written == sizeof(store);
-}
-
+// /profiles.dat is legacy: everything it held is a subset of the settings
+// file, which is now the single source of truth. The file is only read once
+// at boot to migrate devices upgrading from firmware that still wrote it
+// (where it could be newer than the settings file), then deleted.
 static bool readProfileStore(ProfileStore& store) {
     InternalFS.begin();
     File file = InternalFS.open(PROFILE_STORE_PATH, FILE_O_READ);
@@ -354,31 +331,28 @@ static bool loadFromFlash() {
     return true;
 }
 
-// ── Write batching ─────────────────────────────────────────────────────────
-// A batch defers flash writes so a multi-step update (e.g. saving a new
-// calibration profile + active index + default id) costs one commit per
-// backing file instead of one per setter. Setters still update g_settings
-// immediately; only the flash write is deferred until storageCommitBatch().
+// ── Write batching & deferred persist ──────────────────────────────────────
+// A batch defers the flash write so a multi-step update (e.g. saving a new
+// calibration profile + active index + default id) costs one settings commit
+// instead of one per setter. Setters still update g_settings immediately;
+// only the flash write is deferred until the batch is committed.
+//
+// A deferred persist pushes the commit out of the calling code path entirely:
+// it runs from storageLoop() in the main loop, so time-critical feedback
+// (BLE notify, success haptic) is never blocked behind the flash write.
+// Because persist() always writes the full settings struct, any later
+// successful persist heals an earlier failed or pending one.
 static uint8_t s_batchDepth = 0;
 static bool s_batchSettingsDirty = false;
-static bool s_batchProfilesDirty = false;
+static bool s_deferredPersistPending = false;
+static uint32_t s_deferredPersistDueMs = 0;
+static uint8_t s_deferredPersistRetries = 0;
 
 static bool persistSettings() {
     if (s_batchDepth > 0) {
         s_batchSettingsDirty = true;
         return true;
     }
-    return persist();
-}
-
-static bool persistProfileStore() {
-    if (s_batchDepth > 0) {
-        s_batchProfilesDirty = true;
-        return true;
-    }
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return true;
-#endif
     return persist();
 }
 
@@ -389,21 +363,37 @@ void storageBeginBatch() {
 bool storageCommitBatch() {
     if (s_batchDepth == 0) return true;
     if (--s_batchDepth > 0) return true;
-
-    const bool profilesDirty = s_batchProfilesDirty;
-    bool settingsDirty = s_batchSettingsDirty;
-    s_batchProfilesDirty = false;
+    if (!s_batchSettingsDirty) return true;
     s_batchSettingsDirty = false;
+    return persist();
+}
 
-    if (profilesDirty) {
-#if PROFILE_STORE_HAS_FS
-        if (!writeProfileStore()) settingsDirty = true;
-#else
-        settingsDirty = true;
-#endif
+void storageCommitBatchDeferred() {
+    if (s_batchDepth == 0) return;
+    if (--s_batchDepth > 0) return;
+    if (!s_batchSettingsDirty) return;
+    s_batchSettingsDirty = false;
+    s_deferredPersistPending = true;
+    // Small grace period so the immediate post-save BLE traffic (result
+    // notify, app's GET_PROFILES round-trip) isn't competing with flash ops
+    // for radio-free slots.
+    s_deferredPersistDueMs = millis() + 150u;
+    s_deferredPersistRetries = 0;
+}
+
+void storageLoop() {
+    if (!s_deferredPersistPending) return;
+    if ((int32_t)(millis() - s_deferredPersistDueMs) < 0) return;
+    if (persist()) {
+        s_deferredPersistPending = false;
+        return;
     }
-    if (settingsDirty) return persist();
-    return true;
+    if (++s_deferredPersistRetries >= 5u) {
+        s_deferredPersistPending = false;
+        s_rttTiming.println("[STORAGE] ERROR: deferred persist gave up after retries");
+        return;
+    }
+    s_deferredPersistDueMs = millis() + 1000u;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -417,6 +407,24 @@ void storageSetup() {
         persist();
     }
 #if PROFILE_STORE_HAS_FS
+    // One-time migration from older firmware: /profiles.dat could be newer
+    // than the settings file (old code skipped the settings persist when the
+    // profile store write succeeded), so merge it in, persist once, then
+    // delete it. Afterwards the settings file is the single source of truth.
+    ProfileStore store{};
+    if (readProfileStore(store)) {
+        g_settings.profileCount = store.profileCount;
+        memcpy(g_settings.profiles, store.profiles, store.profileCount * sizeof(OrientationProfile));
+        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+        if (store.activeProfileIndex >= 0 && store.activeProfileIndex < (int8_t)store.profileCount) {
+            g_settings.reserved2[0] = (uint8_t)(store.activeProfileIndex + 1);
+        }
+        g_settings.reserved2[1] = (store.reserved[0] < ACTIVE_PROFILE_MAX_STORED) ? store.reserved[0] : NEXT_OVERWRITE_DEFAULT;
+        if (persist()) {
+            InternalFS.remove(PROFILE_STORE_PATH);
+            logEvent("STORAGE", "profile_store_migrated");
+        }
+    }
     // One-time cleanup of temp files left by older firmware's temp+rename
     // persist pattern (no longer used).
     InternalFS.remove(PROFILE_STORE_TMP_PATH);
@@ -491,23 +499,8 @@ void storageFactoryReset() {
 bool storageLoadProfiles(OrientationProfile* profiles, uint8_t* count) {
     if (!profiles || !count) return false;
 
-#if PROFILE_STORE_HAS_FS
-    ProfileStore store{};
-    if (readProfileStore(store)) {
-        g_settings.profileCount = store.profileCount;
-        memcpy(g_settings.profiles, store.profiles, store.profileCount * sizeof(OrientationProfile));
-        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
-        if (store.activeProfileIndex >= 0 && store.activeProfileIndex < (int8_t)store.profileCount) {
-            g_settings.reserved2[0] = (uint8_t)(store.activeProfileIndex + 1);
-        }
-        g_settings.reserved2[1] = (store.reserved[0] < ACTIVE_PROFILE_MAX_STORED) ? store.reserved[0] : NEXT_OVERWRITE_DEFAULT;
-
-        *count = g_settings.profileCount;
-        memcpy(profiles, g_settings.profiles, g_settings.profileCount * sizeof(OrientationProfile));
-        return true;
-    }
-#endif
-
+    // Profiles live in the settings struct; any legacy /profiles.dat was
+    // already merged into g_settings during storageSetup().
     *count = g_settings.profileCount;
     if (g_settings.profileCount > 8) {
         g_settings.profileCount = 8;
@@ -533,7 +526,7 @@ bool storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
         g_settings.calZ = g_settings.profiles[0].refZ;
     }
 
-    return persistProfileStore();
+    return persistSettings();
 }
 
 int8_t storageLoadActiveProfileIndex() {
@@ -548,7 +541,7 @@ bool storageSaveActiveProfileIndex(int8_t index) {
     if (g_settings.reserved2[0] == stored) return true;
 
     g_settings.reserved2[0] = stored;
-    return persistProfileStore();
+    return persistSettings();
 }
 
 uint8_t storageLoadNextProfileOverwriteIndex() {
@@ -560,7 +553,7 @@ bool storageSaveNextProfileOverwriteIndex(uint8_t index) {
     if (g_settings.reserved2[1] == index) return true;
 
     g_settings.reserved2[1] = index;
-    return persistProfileStore();
+    return persistSettings();
 }
 
 uint32_t storageLoadDefaultProfileId() {

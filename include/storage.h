@@ -9,9 +9,13 @@ void storageSetup();
 
 // Defer flash writes so a multi-step update commits once instead of once per
 // setter. Nestable; the outermost storageCommitBatch() performs the write and
-// returns whether it succeeded.
+// returns whether it succeeded. storageCommitBatchDeferred() instead hands the
+// write to storageLoop() (called from the main loop), so the calling code
+// path is never blocked behind the flash commit.
 void storageBeginBatch();
 bool storageCommitBatch();
+void storageCommitBatchDeferred();
+void storageLoop();
 
 bool saveTrainingDelay(TrainingDelay delay);
 TrainingDelay loadTrainingDelay();

@@ -48,6 +48,7 @@ void loop() {
     motorUpdate();
     bluetoothLoop();
     calibrationLoop();
+    storageLoop();
     inactivityTimerLoop();
     rttDebuggerLoop();
     if (currentMode == MODE_IDLE || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {

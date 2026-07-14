@@ -125,24 +125,17 @@ bool addCalibrationProfile(const char* name) {
     const bool replacing = (s_profileCount >= 8u);
     const uint8_t newIndex = replacing ? nextOverwriteIndex() : s_profileCount;
 
-    OrientationProfile backup[8];
-    memcpy(backup, s_profiles, sizeof(s_profiles));
-    const uint8_t backupCount = s_profileCount;
-    const uint32_t backupActiveId = s_activeProfileId;
-    const uint32_t backupDefaultId = s_defaultProfileId;
-    const int8_t backupActiveIndex = (int8_t)findProfileIndexByIdInternal(backupActiveId);
-    const uint8_t backupOverwriteIndex = nextOverwriteIndex();
-
     OrientationProfile& p = s_profiles[newIndex];
     const uint32_t replacedId = replacing ? p.id : 0u;
     if (!replacing) {
         s_profileCount++;
     }
 
-    // Batch all storage updates into a single flash commit — the eager
-    // per-setter writes used to stall the main loop for seconds after a
-    // successful calibration (each flash op waits on SoftDevice radio slots).
-    const uint32_t saveStartMs = millis();
+    // Batch all storage updates into a single flash commit and hand it to
+    // storageLoop() — the eager per-setter writes used to stall the main loop
+    // for seconds after a successful calibration (each flash op waits on
+    // SoftDevice radio slots). RAM state is authoritative immediately; the
+    // flash write happens right after the success feedback goes out.
     storageBeginBatch();
 
     assignProfileDefaults(p);
@@ -169,26 +162,7 @@ bool addCalibrationProfile(const char* name) {
         advanceOverwriteIndex(newIndex);
     }
 
-    const bool commitOk = storageCommitBatch();
-    rtt.print("[TIMING] calibration profile save total: ");
-    rtt.print(millis() - saveStartMs);
-    rtt.println(" ms");
-
-    if (!commitOk) {
-        memcpy(s_profiles, backup, sizeof(s_profiles));
-        s_profileCount = backupCount;
-        s_activeProfileId = backupActiveId;
-        s_defaultProfileId = backupDefaultId;
-        // Best-effort resync of the storage layer's RAM state (and flash, if
-        // it recovers) with the rolled-back profile set.
-        storageBeginBatch();
-        storageSaveProfiles(s_profiles, s_profileCount);
-        storageSaveActiveProfileIndex(backupActiveIndex);
-        storageSaveDefaultProfileId(backupDefaultId);
-        storageSaveNextProfileOverwriteIndex(backupOverwriteIndex);
-        storageCommitBatch();
-        return false;
-    }
+    storageCommitBatchDeferred();
 
     setPostureOrigin3D(p.refX, p.refY, p.refZ);
     setOrientationLabel(p.name);
