@@ -9,6 +9,9 @@
 #include <math.h>
 
 extern RTTStream rtt;
+// Real RTT stream for flash-write timing measurements; the `rtt` macro below
+// silences all other non-BLE output in this file.
+static RTTStream& s_rttTiming = rtt;
 static AlignRttSilencer s_nonBleRtt;
 #define rtt s_nonBleRtt
 
@@ -129,12 +132,12 @@ static uint32_t computeSettingsCrc(const PersistedSettings& settings) {
 }
 
 #if PROFILE_STORE_HAS_FS
+// LittleFS commits file updates copy-on-write on close(): the previous file
+// contents stay valid until the new data is fully committed, so an in-place
+// overwrite is brownout-safe without a temp-file + rename dance.
 static bool writeProfileStore() {
+    const uint32_t t0 = millis();
     InternalFS.begin();
-    InternalFS.remove(PROFILE_STORE_TMP_PATH);
-
-    File tmp = InternalFS.open(PROFILE_STORE_TMP_PATH, FILE_O_WRITE);
-    if (!tmp) return false;
 
     ProfileStore store{};
     store.magic = PROFILE_STORE_MAGIC;
@@ -143,31 +146,17 @@ static bool writeProfileStore() {
     store.reserved[0] = decodeStoredNextOverwriteIndex();
     memcpy(store.profiles, g_settings.profiles, sizeof(store.profiles));
 
-    const size_t written = tmp.write((uint8_t*)&store, sizeof(store));
-    tmp.flush();
-    tmp.close();
+    File file = InternalFS.open(PROFILE_STORE_PATH, FILE_O_WRITE);
+    if (!file) return false;
 
-    if (written != sizeof(store)) {
-        InternalFS.remove(PROFILE_STORE_TMP_PATH);
-        return false;
-    }
-
-    InternalFS.remove(PROFILE_STORE_PATH);
-    if (InternalFS.rename(PROFILE_STORE_TMP_PATH, PROFILE_STORE_PATH)) {
-        return true;
-    }
-
-    File direct = InternalFS.open(PROFILE_STORE_PATH, FILE_O_WRITE);
-    if (!direct) {
-        InternalFS.remove(PROFILE_STORE_TMP_PATH);
-        return false;
-    }
-
-    const size_t written2 = direct.write((uint8_t*)&store, sizeof(store));
-    direct.flush();
-    direct.close();
-    InternalFS.remove(PROFILE_STORE_TMP_PATH);
-    return written2 == sizeof(store);
+    file.seek(0);  // FILE_O_WRITE opens positioned at end of file
+    const size_t written = file.write((uint8_t*)&store, sizeof(store));
+    file.truncate(sizeof(store));
+    file.close();
+    s_rttTiming.print("[TIMING] profile store write: ");
+    s_rttTiming.print(millis() - t0);
+    s_rttTiming.println(" ms");
+    return written == sizeof(store);
 }
 
 static bool readProfileStore(ProfileStore& store) {
@@ -214,35 +203,22 @@ static void nvmcWriteWords(uint32_t addr, const uint32_t* src, uint32_t count) {
 // ── Persist / load ─────────────────────────────────────────────────────────
 static bool persist() {
 #if PROFILE_STORE_HAS_FS
+    const uint32_t t0 = millis();
     InternalFS.begin();
-    InternalFS.remove(SETTINGS_TMP_PATH);
-    File tmp = InternalFS.open(SETTINGS_TMP_PATH, FILE_O_WRITE);
-    if (tmp) {
+    File file = InternalFS.open(SETTINGS_FILE_PATH, FILE_O_WRITE);
+    if (file) {
         g_settings.crc = computeSettingsCrc(g_settings);
-        size_t written = tmp.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
-        tmp.flush();
-        tmp.close();
+        file.seek(0);  // FILE_O_WRITE opens positioned at end of file
+        size_t written = file.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
+        file.truncate(sizeof(g_settings));
+        file.close();
+        s_rttTiming.print("[TIMING] settings persist: ");
+        s_rttTiming.print(millis() - t0);
+        s_rttTiming.println(" ms");
         if (written == sizeof(g_settings)) {
-            InternalFS.remove(SETTINGS_FILE_PATH);
-            if (InternalFS.rename(SETTINGS_TMP_PATH, SETTINGS_FILE_PATH)) {
-                rtt.println("[STORAGE] Settings persisted to FS successfully");
-                return true;
-            }
-            
-            // Fallback direct write if rename fails
-            File direct = InternalFS.open(SETTINGS_FILE_PATH, FILE_O_WRITE);
-            if (direct) {
-                size_t written2 = direct.write(reinterpret_cast<const uint8_t*>(&g_settings), sizeof(g_settings));
-                direct.flush();
-                direct.close();
-                InternalFS.remove(SETTINGS_TMP_PATH);
-                if (written2 == sizeof(g_settings)) {
-                    rtt.println("[STORAGE] Settings persisted to FS successfully via direct write");
-                    return true;
-                }
-            }
+            rtt.println("[STORAGE] Settings persisted to FS successfully");
+            return true;
         }
-        InternalFS.remove(SETTINGS_TMP_PATH);
     }
     rtt.println("[STORAGE] WARNING: FS persist failed");
 #endif
@@ -378,6 +354,58 @@ static bool loadFromFlash() {
     return true;
 }
 
+// ── Write batching ─────────────────────────────────────────────────────────
+// A batch defers flash writes so a multi-step update (e.g. saving a new
+// calibration profile + active index + default id) costs one commit per
+// backing file instead of one per setter. Setters still update g_settings
+// immediately; only the flash write is deferred until storageCommitBatch().
+static uint8_t s_batchDepth = 0;
+static bool s_batchSettingsDirty = false;
+static bool s_batchProfilesDirty = false;
+
+static bool persistSettings() {
+    if (s_batchDepth > 0) {
+        s_batchSettingsDirty = true;
+        return true;
+    }
+    return persist();
+}
+
+static bool persistProfileStore() {
+    if (s_batchDepth > 0) {
+        s_batchProfilesDirty = true;
+        return true;
+    }
+#if PROFILE_STORE_HAS_FS
+    if (writeProfileStore()) return true;
+#endif
+    return persist();
+}
+
+void storageBeginBatch() {
+    s_batchDepth++;
+}
+
+bool storageCommitBatch() {
+    if (s_batchDepth == 0) return true;
+    if (--s_batchDepth > 0) return true;
+
+    const bool profilesDirty = s_batchProfilesDirty;
+    bool settingsDirty = s_batchSettingsDirty;
+    s_batchProfilesDirty = false;
+    s_batchSettingsDirty = false;
+
+    if (profilesDirty) {
+#if PROFILE_STORE_HAS_FS
+        if (!writeProfileStore()) settingsDirty = true;
+#else
+        settingsDirty = true;
+#endif
+    }
+    if (settingsDirty) return persist();
+    return true;
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 void storageSetup() {
     if (loadFromFlash()) {
@@ -388,6 +416,12 @@ void storageSetup() {
         logEvent("STORAGE", "empty_defaults");
         persist();
     }
+#if PROFILE_STORE_HAS_FS
+    // One-time cleanup of temp files left by older firmware's temp+rename
+    // persist pattern (no longer used).
+    InternalFS.remove(PROFILE_STORE_TMP_PATH);
+    InternalFS.remove(SETTINGS_TMP_PATH);
+#endif
     s_storageInitialized = true;
     session_log_init();
 }
@@ -399,7 +433,7 @@ bool saveTrainingDelay(TrainingDelay delay) {
     }
     if (g_settings.trainingDelay == d) return true;
     g_settings.trainingDelay = d;
-    return persist();
+    return persistSettings();
 }
 
 TrainingDelay loadTrainingDelay() {
@@ -436,7 +470,7 @@ bool storageSaveCalibration(float y, float z) {
     if (g_settings.calY == y && g_settings.calZ == z) return true;
     g_settings.calY = y;
     g_settings.calZ = z;
-    bool ok = persist();
+    bool ok = persistSettings();
     logEvent("STORAGE", "saved_posture_calibration");
     return ok;
 }
@@ -450,7 +484,7 @@ void storageFactoryReset() {
     g_settings.nextProfileId = 1u;
     g_settings.defaultProfileId = 0u;
     memset(g_settings.profiles, 0, sizeof(g_settings.profiles));
-    persist();
+    persistSettings();
     logEvent("STORAGE", "factory_reset");
 }
 
@@ -499,11 +533,7 @@ bool storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
         g_settings.calZ = g_settings.profiles[0].refZ;
     }
 
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return true;
-#endif
-
-    return persist();
+    return persistProfileStore();
 }
 
 int8_t storageLoadActiveProfileIndex() {
@@ -518,10 +548,7 @@ bool storageSaveActiveProfileIndex(int8_t index) {
     if (g_settings.reserved2[0] == stored) return true;
 
     g_settings.reserved2[0] = stored;
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return true;
-#endif
-    return persist();
+    return persistProfileStore();
 }
 
 uint8_t storageLoadNextProfileOverwriteIndex() {
@@ -533,10 +560,7 @@ bool storageSaveNextProfileOverwriteIndex(uint8_t index) {
     if (g_settings.reserved2[1] == index) return true;
 
     g_settings.reserved2[1] = index;
-#if PROFILE_STORE_HAS_FS
-    if (writeProfileStore()) return true;
-#endif
-    return persist();
+    return persistProfileStore();
 }
 
 uint32_t storageLoadDefaultProfileId() {
@@ -546,7 +570,7 @@ uint32_t storageLoadDefaultProfileId() {
 bool storageSaveDefaultProfileId(uint32_t id) {
     if (g_settings.defaultProfileId == id) return true;
     g_settings.defaultProfileId = id;
-    return persist();
+    return persistSettings();
 }
 
 uint32_t storageLoadNextProfileId() {
@@ -557,6 +581,6 @@ bool storageSaveNextProfileId(uint32_t id) {
     if (id == 0u) id = 1u;
     if (g_settings.nextProfileId == id) return true;
     g_settings.nextProfileId = id;
-    return persist();
+    return persistSettings();
 }
 

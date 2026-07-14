@@ -1,5 +1,5 @@
 $pio = "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe"
-$objcopy = "$env:USERPROFILE\.platformio\packages\toolchain-gccarmnoneeabi@1.70201.0\bin\arm-none-eabi-objcopy.exe"
+$objcopy = "$env:USERPROFILE\.platformio\packages\toolchain-gccarmnoneeabi\bin\arm-none-eabi-objcopy.exe"
 $nrfutil = "$env:USERPROFILE\.platformio\packages\framework-arduinoadafruitnrf52\tools\adafruit-nrfutil\win32\adafruit-nrfutil.exe"
 
 & $pio run -e nrf52832_custom
@@ -12,4 +12,4 @@ $nrfutil = "$env:USERPROFILE\.platformio\packages\framework-arduinoadafruitnrf52
   --dev-type 0x0052 `
   --sd-req 0x00B7 `
   --application ".pio\build\nrf52832_custom\firmware.hex" `
-  ".pio\build\nrf52832_custom\aligneye_pod_v5_ota.zip"
+  ".pio\build\nrf52832_custom\Alignpod_1.2.0.zip"

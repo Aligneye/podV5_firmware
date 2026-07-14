@@ -7,6 +7,12 @@ enum TrainingDelay : uint8_t;
 
 void storageSetup();
 
+// Defer flash writes so a multi-step update commits once instead of once per
+// setter. Nestable; the outermost storageCommitBatch() performs the write and
+// returns whether it succeeded.
+void storageBeginBatch();
+bool storageCommitBatch();
+
 bool saveTrainingDelay(TrainingDelay delay);
 TrainingDelay loadTrainingDelay();
 

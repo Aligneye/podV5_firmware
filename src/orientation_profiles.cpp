@@ -130,12 +130,20 @@ bool addCalibrationProfile(const char* name) {
     const uint8_t backupCount = s_profileCount;
     const uint32_t backupActiveId = s_activeProfileId;
     const uint32_t backupDefaultId = s_defaultProfileId;
+    const int8_t backupActiveIndex = (int8_t)findProfileIndexByIdInternal(backupActiveId);
+    const uint8_t backupOverwriteIndex = nextOverwriteIndex();
 
     OrientationProfile& p = s_profiles[newIndex];
     const uint32_t replacedId = replacing ? p.id : 0u;
     if (!replacing) {
         s_profileCount++;
     }
+
+    // Batch all storage updates into a single flash commit — the eager
+    // per-setter writes used to stall the main loop for seconds after a
+    // successful calibration (each flash op waits on SoftDevice radio slots).
+    const uint32_t saveStartMs = millis();
+    storageBeginBatch();
 
     assignProfileDefaults(p);
     p.id = nextProfileId();
@@ -146,20 +154,12 @@ bool addCalibrationProfile(const char* name) {
     p.createdAtEpoch = millis() / 1000UL;
     p.sampleCount = 0;
     p.stabilityScore = 0.0f;
-    if (!storageSaveProfiles(s_profiles, s_profileCount)) {
-        memcpy(s_profiles, backup, sizeof(s_profiles));
-        s_profileCount = backupCount;
-        s_activeProfileId = backupActiveId;
-        s_defaultProfileId = backupDefaultId;
-        return false;
-    }
+    storageSaveProfiles(s_profiles, s_profileCount);
 
     // Activate the newly created profile immediately so the running device uses it.
     // The storage layer persists active profiles by index, not by profile id.
     s_activeProfileId = p.id;
     storageSaveActiveProfileIndex((int8_t)newIndex);
-    setPostureOrigin3D(p.refX, p.refY, p.refZ);
-    setOrientationLabel(p.name);
 
     if (s_defaultProfileId == 0u || s_defaultProfileId == replacedId) {
         s_defaultProfileId = p.id;
@@ -168,6 +168,30 @@ bool addCalibrationProfile(const char* name) {
     if (replacing) {
         advanceOverwriteIndex(newIndex);
     }
+
+    const bool commitOk = storageCommitBatch();
+    rtt.print("[TIMING] calibration profile save total: ");
+    rtt.print(millis() - saveStartMs);
+    rtt.println(" ms");
+
+    if (!commitOk) {
+        memcpy(s_profiles, backup, sizeof(s_profiles));
+        s_profileCount = backupCount;
+        s_activeProfileId = backupActiveId;
+        s_defaultProfileId = backupDefaultId;
+        // Best-effort resync of the storage layer's RAM state (and flash, if
+        // it recovers) with the rolled-back profile set.
+        storageBeginBatch();
+        storageSaveProfiles(s_profiles, s_profileCount);
+        storageSaveActiveProfileIndex(backupActiveIndex);
+        storageSaveDefaultProfileId(backupDefaultId);
+        storageSaveNextProfileOverwriteIndex(backupOverwriteIndex);
+        storageCommitBatch();
+        return false;
+    }
+
+    setPostureOrigin3D(p.refX, p.refY, p.refZ);
+    setOrientationLabel(p.name);
     return true;
 }
 
@@ -225,10 +249,12 @@ void clearCalibrationProfiles() {
     s_profileCount = 0;
     s_activeProfileId = 0;
     s_defaultProfileId = 0;
+    storageBeginBatch();
     storageSaveProfiles(s_profiles, s_profileCount);
     storageSaveActiveProfileIndex(-1);
     storageSaveNextProfileOverwriteIndex(0u);
     storageSaveDefaultProfileId(0u);
+    storageCommitBatch();
     setPostureOrigin(6.75f, 6.75f);
     setOrientationLabel("DEFAULT");
 }
