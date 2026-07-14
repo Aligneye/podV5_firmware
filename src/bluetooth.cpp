@@ -83,11 +83,23 @@ static void updateBatteryReading(unsigned long now);
 static void sendBlePacket(const char* payload) {
     if (!pCharacteristic || !payload) return;
     pCharacteristic->write(payload);
-    pCharacteristic->notify(payload);
+    const bool notified = pCharacteristic->notify(payload);
+    if (!notified && connected) {
+        // notify() fails for two very different reasons; tell them apart:
+        //  - "no-cccd": phone hasn't (re)enabled notifications — nothing sent
+        //  - "queue":   SoftDevice HVN buffers exhausted mid-packet — the
+        //               packet went out TORN (leading chunks only)
+        rtt.print("[BLE TX] NOTIFY-FAIL (");
+        rtt.print(pCharacteristic->notifyEnabled() ? "queue" : "no-cccd");
+        rtt.print(") len=");
+        rtt.print(strlen(payload));
+        rtt.print(" head=");
+        char head[25];
+        strncpy(head, payload, sizeof(head) - 1);
+        head[sizeof(head) - 1] = '\0';
+        rtt.println(head);
+    }
     // RTT mirror moved to rtt_debugger.cpp.
-    // Uncomment the old inline RTT print below if you ever want BLE and RTT
-    // coupled again inside bluetooth.cpp.
-    // rttPrintBlePacket("TX", payload);
     rttDebuggerPrintBlePacket("TX", payload);
 }
 
@@ -809,7 +821,7 @@ static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char
     char payload[320];
     if (success) {
         snprintf(payload, sizeof(payload),
-                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"profile_id\":%lu,\"name\":\"%s\",\"slot\":%u,\"quality\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"total_samples\":%u,\"passed_samples\":%u}",
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"save_state\":\"pending\",\"profile_id\":%lu,\"name\":\"%s\",\"slot\":%u,\"quality\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"total_samples\":%u,\"passed_samples\":%u}",
                  (unsigned long)profileId,
                  name ? name : "",
                  (unsigned)slot,
@@ -829,6 +841,18 @@ static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char
 
 void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint8_t slot, uint16_t quality, uint16_t sampleCount, const char* reason, float refX, float refY, float refZ, uint16_t passedSamples) {
     sendCalibrationDone(success, profileId, name, slot, quality, sampleCount, reason, refX, refY, refZ, passedSamples);
+}
+
+void notifyCalibrationPersisted(uint32_t profileId, bool success, uint32_t totalMs, uint32_t flashMs) {
+    if (!pCharacteristic || !connected) return;
+    char payload[160];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"C\",\"state\":\"SAVED\",\"profile_id\":%lu,\"persisted\":%s,\"save_ms\":%lu,\"flash_ms\":%lu}",
+             (unsigned long)profileId,
+             success ? "true" : "false",
+             (unsigned long)totalMs,
+             (unsigned long)flashMs);
+    sendBlePacket(payload);
 }
 
 static void applyTimeSync(const String &valueRaw) {

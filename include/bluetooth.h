@@ -19,6 +19,7 @@ void bluetoothRequestBatteryStatusBlink();
 void bluetoothNotifyStateChanged();
 void notifyCalibrationStatus(const char* calibResult, const char* complete);
 void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint8_t slot, uint16_t quality, uint16_t sampleCount, const char* reason, float refX = 0.0f, float refY = 0.0f, float refZ = 0.0f, uint16_t passedSamples = 0);
+void notifyCalibrationPersisted(uint32_t profileId, bool success, uint32_t totalMs, uint32_t flashMs);
 void notifyDfuStatus(const char* status);
 void notifyDeviceInfo();
 void notifyTherapyComplete(uint32_t elapsedSeconds);

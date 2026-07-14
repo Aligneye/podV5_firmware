@@ -212,6 +212,13 @@ static bool s_batchSettingsDirty = false;
 static bool s_deferredPersistPending = false;
 static uint32_t s_deferredPersistDueMs = 0;
 static uint8_t s_deferredPersistRetries = 0;
+static uint32_t s_deferredPersistTicketCounter = 0;
+static uint32_t s_deferredPersistPendingTicket = 0;
+static uint32_t s_deferredPersistCompletedTicket = 0;
+static uint32_t s_deferredPersistRequestedMs = 0;
+static uint32_t s_deferredPersistTotalMs = 0;
+static uint32_t s_deferredPersistFlashMs = 0;
+static bool s_deferredPersistSucceeded = false;
 
 static bool persistSettings() {
     if (s_batchDepth > 0) {
@@ -233,32 +240,64 @@ bool storageCommitBatch() {
     return persist();
 }
 
-void storageCommitBatchDeferred() {
-    if (s_batchDepth == 0) return;
-    if (--s_batchDepth > 0) return;
-    if (!s_batchSettingsDirty) return;
+uint32_t storageCommitBatchDeferred() {
+    if (s_batchDepth == 0) return 0;
+    if (--s_batchDepth > 0) return 0;
+    if (!s_batchSettingsDirty) return 0;
     s_batchSettingsDirty = false;
     s_deferredPersistPending = true;
-    // Small grace period so the immediate post-save BLE traffic (result
-    // notify, app's GET_PROFILES round-trip) isn't competing with flash ops
-    // for radio-free slots.
-    s_deferredPersistDueMs = millis() + 150u;
+    if (++s_deferredPersistTicketCounter == 0u) {
+        ++s_deferredPersistTicketCounter;
+    }
+    s_deferredPersistPendingTicket = s_deferredPersistTicketCounter;
+    s_deferredPersistRequestedMs = millis();
+    // Grace period before the flash write, sized to outlast (a) the success
+    // haptic ramp (~350 ms) — the calm haptic is stepped by motorUpdate()
+    // every loop, and the blocking persist would freeze it mid-buzz — and
+    // (b) the post-save BLE burst (result notify, app's GET_PROFILES
+    // round-trip) competing with flash ops for radio-free slots.
+    s_deferredPersistDueMs = millis() + 1000u;
     s_deferredPersistRetries = 0;
+    return s_deferredPersistPendingTicket;
 }
 
 void storageLoop() {
     if (!s_deferredPersistPending) return;
     if ((int32_t)(millis() - s_deferredPersistDueMs) < 0) return;
+    const uint32_t flashStartedMs = millis();
     if (persist()) {
+        s_deferredPersistFlashMs = millis() - flashStartedMs;
+        s_deferredPersistTotalMs = millis() - s_deferredPersistRequestedMs;
+        s_deferredPersistSucceeded = true;
+        s_deferredPersistCompletedTicket = s_deferredPersistPendingTicket;
         s_deferredPersistPending = false;
         return;
     }
     if (++s_deferredPersistRetries >= 5u) {
+        s_deferredPersistFlashMs = millis() - flashStartedMs;
+        s_deferredPersistTotalMs = millis() - s_deferredPersistRequestedMs;
+        s_deferredPersistSucceeded = false;
+        s_deferredPersistCompletedTicket = s_deferredPersistPendingTicket;
         s_deferredPersistPending = false;
         s_rttTiming.println("[STORAGE] ERROR: deferred persist gave up after retries");
         return;
     }
     s_deferredPersistDueMs = millis() + 1000u;
+}
+
+uint32_t storageGetLatestDeferredPersistTicket() {
+    return s_deferredPersistPendingTicket;
+}
+
+bool storageGetDeferredPersistResult(uint32_t ticket,
+                                     bool* success,
+                                     uint32_t* totalMs,
+                                     uint32_t* flashMs) {
+    if (ticket == 0u || s_deferredPersistCompletedTicket != ticket) return false;
+    if (success) *success = s_deferredPersistSucceeded;
+    if (totalMs) *totalMs = s_deferredPersistTotalMs;
+    if (flashMs) *flashMs = s_deferredPersistFlashMs;
+    return true;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
