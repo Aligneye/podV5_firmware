@@ -2,7 +2,6 @@
 #include "calibration.h"
 #include "session_log.h"
 #include "therapy.h"
-#include "nrf.h"
 #include "rtt_debugger.h"
 #include <RTTStream.h>
 #include <string.h>
@@ -25,28 +24,22 @@ using namespace Adafruit_LittleFS_Namespace;
 #endif
 
 // ── Flash layout ───────────────────────────────────────────────────────────
-// nRF52832 has 512 KB flash in 4 KB (0x1000) pages. We reserve the last
-// page (0x7F000-0x7FFFF) as a dedicated settings page. Linker scripts for
-// this project place the application well below this address.
-static constexpr uint32_t SETTINGS_PAGE_ADDR = 0x00073000UL;
+// nRF52832, 512 KB flash in 4 KB (0x1000) pages:
+//   0x00000-0x25FFF  MBR + SoftDevice S132
+//   0x26000-...      Application image
+//   ...    -0x6CFFF  Free (DFU dual-bank staging area during OTA — do not use)
+//   0x6D000-0x73FFF  Internal LittleFS, 28 KB (framework-fixed; all files)
+//   0x74000-0x7EFFF  Bootloader
+//   0x7F000-0x7FFFF  Firmware signature
+//
+// Historical note: firmware up to v1.2.0 used 0x73000 as a raw NVMC settings
+// page — but that address is the LAST PAGE OF THE LITTLEFS REGION, so raw
+// erases there could corrupt the live filesystem and trigger a full reformat
+// (total data loss). All raw-page settings code has been removed; settings
+// persist via the filesystem only. Never reserve addresses inside
+// framework-owned regions.
 static constexpr uint32_t SETTINGS_MAGIC     = 0x414C4733UL;  // "ALG3"
 static constexpr uint16_t SETTINGS_VERSION   = 5u;
-
-struct PersistedSettingsV1 {
-    uint32_t magic;
-    uint16_t version;
-    uint8_t  therapySubModeIndex;
-    uint8_t  reserved;
-};
-
-struct PersistedSettingsV3 {
-    uint32_t magic;
-    uint16_t version;
-    uint8_t  trainingDelay;
-    uint8_t  reserved;
-    float     calY;
-    float     calZ;
-};
 
 struct PersistedSettings {
     uint32_t magic;
@@ -86,7 +79,6 @@ static const char* PROFILE_STORE_PATH = "/profiles.dat";
 static const char* PROFILE_STORE_TMP_PATH = "/profiles.tmp";
 static const char* SETTINGS_FILE_PATH = "/sys_settings.dat";
 static const char* SETTINGS_TMP_PATH  = "/sys_settings.tmp";
-static bool s_storageInitialized = false;
 
 struct ProfileStore {
     uint32_t magic;
@@ -151,32 +143,6 @@ static bool readProfileStore(ProfileStore& store) {
 }
 #endif
 
-// ── NVMC helpers ───────────────────────────────────────────────────────────
-static inline void nvmcWaitReady() {
-    while (NRF_NVMC->READY == NVMC_READY_READY_Busy) { /* spin */ }
-}
-
-static void nvmcErasePage(uint32_t addr) {
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Een;
-    nvmcWaitReady();
-    NRF_NVMC->ERASEPAGE = addr;
-    nvmcWaitReady();
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren;
-    nvmcWaitReady();
-}
-
-static void nvmcWriteWords(uint32_t addr, const uint32_t* src, uint32_t count) {
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen;
-    nvmcWaitReady();
-    volatile uint32_t* dst = reinterpret_cast<volatile uint32_t*>(addr);
-    for (uint32_t i = 0; i < count; i++) {
-        dst[i] = src[i];
-        nvmcWaitReady();
-    }
-    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren;
-    nvmcWaitReady();
-}
-
 // ── Persist / load ─────────────────────────────────────────────────────────
 static bool persist() {
 #if PROFILE_STORE_HAS_FS
@@ -200,26 +166,11 @@ static bool persist() {
     rtt.println("[STORAGE] WARNING: FS persist failed");
 #endif
 
-    // Only allow NVMC fallback at boot time before storage setup completes.
-    // At runtime (BLE active, calibration running), direct NVMC flash writes are blocked to avoid CPU reset.
-    if (s_storageInitialized) {
-        rtt.println("[STORAGE] ERROR: FS persist failed; NVMC fallback blocked during active runtime");
-        return false;
-    }
-
-    // Pad struct to whole 32-bit words for NVMC word writes.
-    constexpr uint32_t kWordCount =
-        (sizeof(PersistedSettings) + 3u) / 4u;
-    uint32_t buffer[kWordCount] = {0};
-    g_settings.crc = computeSettingsCrc(g_settings);
-    memcpy(buffer, &g_settings, sizeof(g_settings));
-
-    noInterrupts();
-    nvmcErasePage(SETTINGS_PAGE_ADDR);
-    nvmcWriteWords(SETTINGS_PAGE_ADDR, buffer, kWordCount);
-    interrupts();
-    rtt.println("[STORAGE] Settings persisted to NVMC (boot-time)");
-    return true;
+    // No raw-page fallback (see flash layout note above) — a failed settings
+    // write must never escalate into losing every file on the device. RAM
+    // state stays authoritative and the next successful persist (or
+    // storageLoop() retry) heals flash.
+    return false;
 }
 
 static bool loadFromFlash() {
@@ -238,97 +189,11 @@ static bool loadFromFlash() {
                 return true;
             }
         }
-        rtt.println("[STORAGE] Invalid settings file on FS, falling back to NVMC");
+        rtt.println("[STORAGE] Invalid settings file on FS");
     }
 #endif
 
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(SETTINGS_PAGE_ADDR);
-    const uint32_t* magic = reinterpret_cast<const uint32_t*>(base);
-    if (*magic != SETTINGS_MAGIC) return false;
-
-    const uint16_t* ver = reinterpret_cast<const uint16_t*>(base + 4);
-    if (*ver == 1u || *ver == 2u || *ver == 3u) {
-        uint8_t trainingDelay = (uint8_t)TRAIN_INSTANT;
-        float calY = 6.75f;
-        float calZ = 6.75f;
-
-        if (*ver == 2u || *ver == 3u) {
-            const PersistedSettingsV3* oldSettings =
-                reinterpret_cast<const PersistedSettingsV3*>(SETTINGS_PAGE_ADDR);
-            trainingDelay = oldSettings->trainingDelay;
-            calY = oldSettings->calY;
-            calZ = oldSettings->calZ;
-        }
-
-        if (fabsf(calY) < 0.1f && fabsf(calZ) < 0.1f) {
-            calY = 6.75f;
-            calZ = 6.75f;
-        }
-
-        // Reconstruct refX using the heuristic check for gravity units (calY^2 + calZ^2 < 2.0f)
-        float magSq = calY * calY + calZ * calZ;
-        float refX = 0.0f;
-        if (magSq < 2.0f) {
-            // G-units
-            float diff = 1.0f - magSq;
-            refX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
-        } else {
-            // m/s^2
-            float diff = (9.80665f * 9.80665f) - magSq;
-            refX = (diff > 0.0f) ? sqrtf(diff) : 0.0f;
-        }
-
-        g_settings.magic = SETTINGS_MAGIC;
-        g_settings.version = SETTINGS_VERSION;
-        g_settings.trainingDelay = trainingDelay;
-        g_settings.reserved = 0;
-        g_settings.calY = calY;
-        g_settings.calZ = calZ;
-        g_settings.profileCount = 1;
-        memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
-        g_settings.nextProfileId = 2u;
-        g_settings.defaultProfileId = 0u;
-
-        g_settings.profiles[0].id = 1u;
-        strncpy(g_settings.profiles[0].name, "Default Vertical", sizeof(g_settings.profiles[0].name) - 1);
-        g_settings.profiles[0].name[sizeof(g_settings.profiles[0].name) - 1] = '\0';
-        g_settings.profiles[0].refX = refX;
-        g_settings.profiles[0].refY = calY;
-        g_settings.profiles[0].refZ = calZ;
-        g_settings.profiles[0].createdAtEpoch = 0;
-        g_settings.profiles[0].sampleCount = 0;
-        g_settings.profiles[0].stabilityScore = 0.0f;
-        g_settings.profiles[0].valid = 1;
-
-        g_settings.crc = 0u;
-        persist();  // migrate flash layout to v4
-        rtt.println("[STORAGE] Settings migrated from legacy NVMC (v1-v3)");
-        return true;
-    }
-    if (*ver != SETTINGS_VERSION) return false;
-
-    const PersistedSettings* flash =
-        reinterpret_cast<const PersistedSettings*>(SETTINGS_PAGE_ADDR);
-    if (flash->trainingDelay < (uint8_t)TRAIN_DELAYED ||
-        flash->trainingDelay > (uint8_t)TRAIN_INSTANT) {
-        return false;
-    }
-
-    g_settings = *flash;
-    if (g_settings.nextProfileId == 0u) g_settings.nextProfileId = 1u;
-    if (fabsf(g_settings.calY) < 0.1f && fabsf(g_settings.calZ) < 0.1f) {
-        g_settings.calY = 6.75f;
-        g_settings.calZ = 6.75f;
-    }
-    const uint32_t expectedCrc = computeSettingsCrc(g_settings);
-    if (g_settings.crc != 0u && g_settings.crc != expectedCrc) {
-        return false;
-    }
-
-    // We loaded it from NVMC successfully, now save it to FS for future accesses.
-    rtt.println("[STORAGE] Settings loaded from NVMC, saving to FS");
-    persist();
-    return true;
+    return false;
 }
 
 // ── Write batching & deferred persist ──────────────────────────────────────
@@ -430,7 +295,6 @@ void storageSetup() {
     InternalFS.remove(PROFILE_STORE_TMP_PATH);
     InternalFS.remove(SETTINGS_TMP_PATH);
 #endif
-    s_storageInitialized = true;
     session_log_init();
 }
 
