@@ -55,6 +55,19 @@
 #define BLE_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define BLE_DEVICE_NAME         "align pod"
 
+// ── Session sync over BLE ──────────────────────────────────
+// Sessions per FETCH_SESSIONS transfer window. The app repeats FETCH until
+// SESS_HDR reports n=0, so this only bounds RAM (window copies) per round.
+#define SYNC_MAX_WINDOW          40
+// Refuse to stream below this ATT MTU: sync packets are sized to fit a
+// single notification so a failed notify() can be retried atomically.
+// 140 = smallest 4-pair SEV chunk (~137 B payload) + 3 B ATT header.
+#define SYNC_MIN_MTU             140
+#define SYNC_ACK_TIMEOUT_MS      10000UL
+// Connection interval requests in 1.25 ms units (phone may decline).
+#define SYNC_FAST_CONN_INTERVAL  12   // 15 ms while a transfer is active
+#define SYNC_IDLE_CONN_INTERVAL  24   // 30 ms restored after the transfer
+
 // ── RTT logging ─────────────────────────────────────────────────────────────
 #ifndef ALIGN_RTT_JSON_LOG
 #define ALIGN_RTT_JSON_LOG       0
@@ -86,6 +99,10 @@
 
 #ifndef ALIGN_RTT_SESSION_VERBOSE
 #define ALIGN_RTT_SESSION_VERBOSE 0
+#endif
+
+#ifndef ALIGN_RTT_SYNC_LOG
+#define ALIGN_RTT_SYNC_LOG 0
 #endif
 
 // ── Therapy patterns (10 total) ───────────────────────────

@@ -36,16 +36,20 @@ static uint32_t nextProfileId() {
     return id;
 }
 
-static uint8_t nextOverwriteIndex() {
-    uint8_t index = storageLoadNextProfileOverwriteIndex();
-    if (index >= 8u) {
-        index = 0u;
+// Victim slot when all 8 profiles are in use: the profile with the smallest
+// id (ids are monotonic, so smallest = oldest), never the default profile —
+// the default may only change via explicit command, deletion, or clear-all.
+static uint8_t oldestReplaceableIndex() {
+    uint8_t victim = 0;
+    uint32_t lowestId = 0xFFFFFFFFu;
+    for (uint8_t i = 0; i < s_profileCount; i++) {
+        if (s_profiles[i].id == s_defaultProfileId) continue;
+        if (s_profiles[i].id < lowestId) {
+            lowestId = s_profiles[i].id;
+            victim = i;
+        }
     }
-    return index;
-}
-
-static void advanceOverwriteIndex(uint8_t index) {
-    storageSaveNextProfileOverwriteIndex((uint8_t)((index + 1u) % 8u));
+    return victim;
 }
 
 uint8_t getProfileCount() { return s_profileCount; }
@@ -105,8 +109,9 @@ void initProfiles() {
         storageSaveProfiles(s_profiles, s_profileCount);
     }
 
-    if (storageLoadActiveProfileIndex() >= 0 && storageLoadActiveProfileIndex() < (int8_t)s_profileCount) {
-        s_activeProfileId = s_profiles[storageLoadActiveProfileIndex()].id;
+    const uint32_t storedActiveId = storageLoadActiveProfileId();
+    if (storedActiveId != 0u && findProfileIndexByIdInternal(storedActiveId) >= 0) {
+        s_activeProfileId = storedActiveId;
     }
     // Do not force defaultProfileId to s_profiles[0].id if it is 0,
     // as 0 represents "System default" which is a valid default choice.
@@ -123,10 +128,9 @@ bool addCalibrationProfile(const char* name) {
     if (!name || !*name || !isLastCalibrationValid()) return false;
 
     const bool replacing = (s_profileCount >= 8u);
-    const uint8_t newIndex = replacing ? nextOverwriteIndex() : s_profileCount;
+    const uint8_t newIndex = replacing ? oldestReplaceableIndex() : s_profileCount;
 
     OrientationProfile& p = s_profiles[newIndex];
-    const uint32_t replacedId = replacing ? p.id : 0u;
     if (!replacing) {
         s_profileCount++;
     }
@@ -149,18 +153,10 @@ bool addCalibrationProfile(const char* name) {
     p.stabilityScore = 0.0f;
     storageSaveProfiles(s_profiles, s_profileCount);
 
-    // Activate the newly created profile immediately so the running device uses it.
-    // The storage layer persists active profiles by index, not by profile id.
+    // Activate the newly created profile immediately so the running device
+    // uses it. The default profile is deliberately left untouched.
     s_activeProfileId = p.id;
-    storageSaveActiveProfileIndex((int8_t)newIndex);
-
-    if (s_defaultProfileId == 0u || s_defaultProfileId == replacedId) {
-        s_defaultProfileId = p.id;
-        storageSaveDefaultProfileId(s_defaultProfileId);
-    }
-    if (replacing) {
-        advanceOverwriteIndex(newIndex);
-    }
+    storageSaveActiveProfileId(p.id);
 
     (void)storageCommitBatchDeferred();
 
@@ -170,14 +166,12 @@ bool addCalibrationProfile(const char* name) {
 }
 
 bool addNextCalibrationProfile() {
-    char name[16];
-    const uint8_t slot = (s_profileCount >= 8u) ? nextOverwriteIndex() : s_profileCount;
-    snprintf(name, sizeof(name), "Profile %u", (unsigned)(slot + 1u));
+    char name[24];
+    snprintf(name, sizeof(name), "Profile %lu", (unsigned long)storageLoadNextProfileId());
     return addCalibrationProfile(name);
 }
 
 bool deleteCalibrationProfileById(uint32_t id) {
-    if (s_defaultProfileId == id) return false; // Cannot delete the default profile
     int index = findProfileIndexByIdInternal(id);
     if (index < 0) return false;
 
@@ -196,11 +190,17 @@ bool deleteCalibrationProfileById(uint32_t id) {
         s_profileCount = backupCount;
         return false;
     }
-    if (s_activeProfileId == id) selectDefaultCalibrationProfile();
+    // Deleted the default: revert to the system default — the firmware never
+    // promotes another profile on its own. Cleared before the active fallback
+    // below so deleting a profile that was both active and default lands on
+    // the system default in one pass.
     if (s_defaultProfileId == id) {
-        s_defaultProfileId = (s_profileCount > 0) ? s_profiles[0].id : 0u;
-        storageSaveDefaultProfileId(s_defaultProfileId);
+        s_defaultProfileId = 0u;
+        storageSaveDefaultProfileId(0u);
     }
+    // Deleted the active: fall back to the default profile (system default
+    // when none is set).
+    if (s_activeProfileId == id) selectCalibrationProfileById(s_defaultProfileId);
     return true;
 }
 
@@ -225,8 +225,7 @@ void clearCalibrationProfiles() {
     s_defaultProfileId = 0;
     storageBeginBatch();
     storageSaveProfiles(s_profiles, s_profileCount);
-    storageSaveActiveProfileIndex(-1);
-    storageSaveNextProfileOverwriteIndex(0u);
+    storageSaveActiveProfileId(0u);
     storageSaveDefaultProfileId(0u);
     storageCommitBatch();
     setPostureOrigin(6.75f, 6.75f);
@@ -247,7 +246,7 @@ bool selectCalibrationProfileById(uint32_t id) {
     int index = findProfileIndexByIdInternal(id);
     if (index < 0) return false;
     s_activeProfileId = id;
-    storageSaveActiveProfileIndex(index);
+    storageSaveActiveProfileId(id);
     setPostureOrigin3D(s_profiles[index].refX, s_profiles[index].refY, s_profiles[index].refZ);
     setOrientationLabel(s_profiles[index].name);
     return true;
@@ -262,7 +261,7 @@ void setProfileDefaultById(uint32_t id) {
 
 void selectDefaultCalibrationProfile() {
     s_activeProfileId = 0u;
-    storageSaveActiveProfileIndex(-1);
+    storageSaveActiveProfileId(0u);
     setPostureOrigin(6.75f, 6.75f);
     setOrientationLabel("DEFAULT");
 }

@@ -379,6 +379,23 @@ void session_log_mark_sent(int fileIndex) {
 #endif
 }
 
+bool session_log_mark_sent_matching(const StoredSession& s) {
+    ensureReady();
+    for (int i = 0; i < g_count; i++) {
+        const StoredSession& cur = g_sessions[i];
+        if (cur.sent) continue;
+        if (cur.type == s.type &&
+            cur.start_ts == s.start_ts &&
+            cur.duration_sec == s.duration_sec &&
+            cur.wrong_count == s.wrong_count &&
+            cur.wrong_dur_sec == s.wrong_dur_sec) {
+            session_log_mark_sent(i);
+            return true;
+        }
+    }
+    return false;
+}
+
 void session_log_purge_sent() {
     ensureReady();
 

@@ -39,9 +39,28 @@ using namespace Adafruit_LittleFS_Namespace;
 // persist via the filesystem only. Never reserve addresses inside
 // framework-owned regions.
 static constexpr uint32_t SETTINGS_MAGIC     = 0x414C4733UL;  // "ALG3"
-static constexpr uint16_t SETTINGS_VERSION   = 5u;
+static constexpr uint16_t SETTINGS_VERSION   = 6u;
 
 struct PersistedSettings {
+    uint32_t magic;
+    uint16_t version;
+    uint8_t  trainingDelay;
+    uint8_t  reserved;
+    float     calY;
+    float     calZ;
+    uint8_t            profileCount;
+    uint8_t            reserved2[3];
+    uint32_t           nextProfileId;
+    uint32_t           defaultProfileId;
+    uint32_t           activeProfileId;  // 0 = system default (real ids start at 1)
+    OrientationProfile profiles[8];
+    uint32_t           crc;
+};
+
+// Settings layout written by firmware versions ≤5: no activeProfileId field —
+// the active selection was persisted as index+1 in reserved2[0]. Kept only so
+// loadFromFlash() can migrate existing devices without wiping their profiles.
+struct PersistedSettingsV5 {
     uint32_t magic;
     uint16_t version;
     uint8_t  trainingDelay;
@@ -67,13 +86,13 @@ static PersistedSettings g_settings = {
     {0, 0, 0},
     1u,
     0u,
+    0u,
     {},
     0u
 };
 
 static constexpr uint8_t ACTIVE_PROFILE_DEFAULT = 0u;
 static constexpr uint8_t ACTIVE_PROFILE_MAX_STORED = 8u;
-static constexpr uint8_t NEXT_OVERWRITE_DEFAULT = 0u;
 static constexpr uint32_t PROFILE_STORE_MAGIC = 0x50524631UL; // "PRF1"
 static const char* PROFILE_STORE_PATH = "/profiles.dat";
 static const char* PROFILE_STORE_TMP_PATH = "/profiles.tmp";
@@ -88,22 +107,6 @@ struct ProfileStore {
     OrientationProfile profiles[8];
 };
 
-static int8_t decodeStoredActiveProfileIndex() {
-    const uint8_t stored = g_settings.reserved2[0];
-    if (stored == ACTIVE_PROFILE_DEFAULT) return -1;
-    if (stored > ACTIVE_PROFILE_MAX_STORED) return -1;
-
-    const int8_t index = (int8_t)(stored - 1u);
-    if (index >= (int8_t)g_settings.profileCount) return -1;
-    return index;
-}
-
-static uint8_t decodeStoredNextOverwriteIndex() {
-    const uint8_t stored = g_settings.reserved2[1];
-    if (stored >= ACTIVE_PROFILE_MAX_STORED) return NEXT_OVERWRITE_DEFAULT;
-    return stored;
-}
-
 static uint32_t decodeStoredNextProfileId() {
     if (g_settings.nextProfileId == 0u) return 1u;
     return g_settings.nextProfileId;
@@ -113,14 +116,18 @@ static uint32_t decodeStoredDefaultProfileId() {
     return g_settings.defaultProfileId;
 }
 
-static uint32_t computeSettingsCrc(const PersistedSettings& settings) {
-    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&settings);
+static uint32_t fnv1aCrc(const void* data, size_t len) {
+    const uint8_t* bytes = static_cast<const uint8_t*>(data);
     uint32_t crc = 2166136261u;
-    for (size_t i = 0; i < sizeof(PersistedSettings) - sizeof(uint32_t); i++) {
+    for (size_t i = 0; i < len; i++) {
         crc ^= bytes[i];
         crc *= 16777619u;
     }
     return crc;
+}
+
+static uint32_t computeSettingsCrc(const PersistedSettings& settings) {
+    return fnv1aCrc(&settings, sizeof(PersistedSettings) - sizeof(uint32_t));
 }
 
 #if PROFILE_STORE_HAS_FS
@@ -173,6 +180,40 @@ static bool persist() {
     return false;
 }
 
+// Migrates a ≤v5 settings blob (active profile persisted as index+1 in
+// reserved2[0]) into g_settings and re-persists in the current layout.
+// `raw` must hold at least sizeof(PersistedSettingsV5) valid bytes.
+static bool migrateSettingsV5(const void* raw) {
+    const PersistedSettingsV5* old = static_cast<const PersistedSettingsV5*>(raw);
+    if (old->magic != SETTINGS_MAGIC) return false;
+    const uint32_t expectedCrc = fnv1aCrc(old, sizeof(PersistedSettingsV5) - sizeof(uint32_t));
+    if (old->crc != 0u && old->crc != expectedCrc) return false;
+
+    g_settings.magic = SETTINGS_MAGIC;
+    g_settings.version = SETTINGS_VERSION;
+    g_settings.trainingDelay = old->trainingDelay;
+    g_settings.reserved = old->reserved;
+    g_settings.calY = old->calY;
+    g_settings.calZ = old->calZ;
+    g_settings.profileCount = (old->profileCount > 8u) ? 8u : old->profileCount;
+    memcpy(g_settings.reserved2, old->reserved2, sizeof(g_settings.reserved2));
+    g_settings.nextProfileId = old->nextProfileId;
+    g_settings.defaultProfileId = old->defaultProfileId;
+    memcpy(g_settings.profiles, old->profiles, sizeof(g_settings.profiles));
+
+    g_settings.activeProfileId = 0u;
+    const uint8_t storedIdx = old->reserved2[0];
+    if (storedIdx != ACTIVE_PROFILE_DEFAULT && storedIdx <= ACTIVE_PROFILE_MAX_STORED &&
+        (uint8_t)(storedIdx - 1u) < g_settings.profileCount) {
+        g_settings.activeProfileId = g_settings.profiles[storedIdx - 1u].id;
+    }
+    g_settings.reserved2[0] = 0u;  // byte no longer carries the active index
+
+    persist();
+    logEvent("STORAGE", "settings_migrated_v6");
+    return true;
+}
+
 static bool loadFromFlash() {
 #if PROFILE_STORE_HAS_FS
     InternalFS.begin();
@@ -189,6 +230,10 @@ static bool loadFromFlash() {
                 return true;
             }
         }
+        if (readBytes == (int)sizeof(PersistedSettingsV5) && migrateSettingsV5(&tempSettings)) {
+            rtt.println("[STORAGE] Settings migrated from v5 layout");
+            return true;
+        }
         rtt.println("[STORAGE] Invalid settings file on FS");
     }
 #endif
@@ -198,7 +243,7 @@ static bool loadFromFlash() {
 
 // ── Write batching & deferred persist ──────────────────────────────────────
 // A batch defers the flash write so a multi-step update (e.g. saving a new
-// calibration profile + active index + default id) costs one settings commit
+// calibration profile + active profile id) costs one settings commit
 // instead of one per setter. Setters still update g_settings immediately;
 // only the flash write is deferred until the batch is committed.
 //
@@ -254,7 +299,7 @@ uint32_t storageCommitBatchDeferred() {
     // Grace period before the flash write, sized to outlast (a) the success
     // haptic ramp (~350 ms) — the calm haptic is stepped by motorUpdate()
     // every loop, and the blocking persist would freeze it mid-buzz — and
-    // (b) the post-save BLE burst (result notify, app's GET_PROFILES
+    // (b) the post-save BLE burst (result notify, app's GET_CALIBRATION_PROFILE
     // round-trip) competing with flash ops for radio-free slots.
     s_deferredPersistDueMs = millis() + 1000u;
     s_deferredPersistRetries = 0;
@@ -320,10 +365,10 @@ void storageSetup() {
         g_settings.profileCount = store.profileCount;
         memcpy(g_settings.profiles, store.profiles, store.profileCount * sizeof(OrientationProfile));
         memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
+        g_settings.activeProfileId = 0u;
         if (store.activeProfileIndex >= 0 && store.activeProfileIndex < (int8_t)store.profileCount) {
-            g_settings.reserved2[0] = (uint8_t)(store.activeProfileIndex + 1);
+            g_settings.activeProfileId = store.profiles[store.activeProfileIndex].id;
         }
-        g_settings.reserved2[1] = (store.reserved[0] < ACTIVE_PROFILE_MAX_STORED) ? store.reserved[0] : NEXT_OVERWRITE_DEFAULT;
         if (persist()) {
             InternalFS.remove(PROFILE_STORE_PATH);
             logEvent("STORAGE", "profile_store_migrated");
@@ -394,6 +439,7 @@ void storageFactoryReset() {
     memset(g_settings.reserved2, 0, sizeof(g_settings.reserved2));
     g_settings.nextProfileId = 1u;
     g_settings.defaultProfileId = 0u;
+    g_settings.activeProfileId = 0u;
     memset(g_settings.profiles, 0, sizeof(g_settings.profiles));
     persistSettings();
     logEvent("STORAGE", "factory_reset");
@@ -432,30 +478,13 @@ bool storageSaveProfiles(const OrientationProfile* profiles, uint8_t count) {
     return persistSettings();
 }
 
-int8_t storageLoadActiveProfileIndex() {
-    return decodeStoredActiveProfileIndex();
+uint32_t storageLoadActiveProfileId() {
+    return g_settings.activeProfileId;
 }
 
-bool storageSaveActiveProfileIndex(int8_t index) {
-    uint8_t stored = ACTIVE_PROFILE_DEFAULT;
-    if (index >= 0 && index < (int8_t)g_settings.profileCount && index < (int8_t)ACTIVE_PROFILE_MAX_STORED) {
-        stored = (uint8_t)(index + 1);
-    }
-    if (g_settings.reserved2[0] == stored) return true;
-
-    g_settings.reserved2[0] = stored;
-    return persistSettings();
-}
-
-uint8_t storageLoadNextProfileOverwriteIndex() {
-    return decodeStoredNextOverwriteIndex();
-}
-
-bool storageSaveNextProfileOverwriteIndex(uint8_t index) {
-    if (index >= ACTIVE_PROFILE_MAX_STORED) index = NEXT_OVERWRITE_DEFAULT;
-    if (g_settings.reserved2[1] == index) return true;
-
-    g_settings.reserved2[1] = index;
+bool storageSaveActiveProfileId(uint32_t id) {
+    if (g_settings.activeProfileId == id) return true;
+    g_settings.activeProfileId = id;
     return persistSettings();
 }
 

@@ -53,6 +53,10 @@ void session_log_append(const StoredSession& s);
 int  session_log_count_unsent();
 bool session_log_get_unsent(int index, StoredSession& out, int& fileIndex);
 void session_log_mark_sent(int fileIndex);
+// Marks the first unsent session matching `s` by content identity
+// (type + start_ts + duration + wrong counters). Safe even if array
+// indexes shifted since `s` was copied out. Returns true if one was marked.
+bool session_log_mark_sent_matching(const StoredSession& s);
 void session_log_purge_sent();
 
 void session_log_write_training_events(uint32_t sessionTs,
