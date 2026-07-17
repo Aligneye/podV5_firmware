@@ -7,6 +7,7 @@
 #include "storage.h"
 #include "device_time.h"
 #include "session_stats.h"
+#include "session_log.h"
 #include "BatteryMonitor.h"
 #include "version.h"
 #include "rtt_debugger.h"
@@ -67,6 +68,45 @@ static bool batteryReadValid = false;
 static bool batteryBlinkActive = false;
 static unsigned long batteryBlinkStartMs = 0;
 
+// ── Session sync FSM ─────────────────────────────────────────────────────
+// Streams stored sessions to the app after a FETCH_SESSIONS command.
+// One packet per loop tick, advanced only when notify() succeeds; nothing
+// is marked sent on flash until the app's final ACK_SESSIONS arrives.
+enum class SyncState : uint8_t { Idle, Hdr, Stream, End, WaitAck, Retx };
+
+struct SyncEntry {
+    StoredSession s;
+    uint16_t seqBase;   // seq of this entry's summary packet
+    uint8_t  evCount;   // event items (posture pairs / therapy patterns)
+    uint8_t  evChunks;  // SEV packets that follow the summary
+};
+
+static SyncState syncState = SyncState::Idle;
+static SyncEntry syncWindow[SYNC_MAX_WINDOW];
+static uint8_t  syncCount = 0;
+static uint8_t  syncEntryIdx = 0;
+static uint8_t  syncChunkIdx = 0;       // 0 = summary, 1..evChunks = SEV chunk
+static uint16_t syncSeq = 0;
+static uint32_t syncXferId = 0;
+static uint16_t syncPairsPerChunk = 9;  // fixed per transfer from the MTU
+static uint16_t syncTherapyPerChunk = 30;
+static unsigned long syncAckWaitStartMs = 0;
+static bool syncFastParamsActive = false;
+static volatile bool syncFetchRequested = false;
+static volatile bool syncAckReceived = false;
+static volatile bool syncAckOk = false;
+static uint16_t syncRetxList[16];
+static volatile uint8_t syncRetxCount = 0;
+static uint8_t syncRetxIdx = 0;
+static volatile bool sessAvailPending = false;
+
+// Event cache for the entry currently being streamed / retransmitted.
+static PostureEventReadResult syncPostureEv;
+static TherapyEventReadResult syncTherapyEv;
+static int syncEvLoadedFor = -1;
+
+static void syncReset();
+
 static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 500UL;
 static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
@@ -80,8 +120,8 @@ static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void updateBatteryReading(unsigned long now);
 
-static void sendBlePacket(const char* payload) {
-    if (!pCharacteristic || !payload) return;
+static bool sendBlePacket(const char* payload) {
+    if (!pCharacteristic || !payload) return false;
     pCharacteristic->write(payload);
     const bool notified = pCharacteristic->notify(payload);
     if (!notified && connected) {
@@ -101,6 +141,7 @@ static void sendBlePacket(const char* payload) {
     }
     // RTT mirror moved to rtt_debugger.cpp.
     rttDebuggerPrintBlePacket("TX", payload);
+    return notified;
 }
 
 static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* error = nullptr) {
@@ -497,6 +538,14 @@ static void onBleConnect(uint16_t conn_handle) {
     connectedSinceMs = millis();
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
+    syncReset();
+    // Bigger link-layer packets + 2M PHY make session sync ~3-6x faster;
+    // both are polite requests the phone may decline (S132 supports both).
+    BLEConnection* conn = Bluefruit.Connection(conn_handle);
+    if (conn) {
+        conn->requestDataLengthUpdate();
+        conn->requestPHY();
+    }
     turnRgbLedOff();
     // RTT trace intentionally disabled here.
     // Uncomment if you want connection events mirrored locally again.
@@ -507,6 +556,9 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)conn_handle;
     connected = false;
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
+    // Abandon any in-flight transfer: nothing was marked sent, so the whole
+    // window simply re-streams on the next FETCH_SESSIONS.
+    syncReset();
     connectionHapticPending = false;
     connectionHapticPlayed = false;
     disconnectionHapticPending = true;
@@ -777,54 +829,43 @@ static void sendProfileList() {
     char profilesJson[800];
     profilesJson[0] = '\0';
     strncat(profilesJson, "[", sizeof(profilesJson) - 1);
-    bool activeProfileSent = false;
-    bool defaultProfileSent = false;
     for (uint8_t i = 0; i < getProfileCount(); i++) {
         const OrientationProfile* p = getProfile(i);
         if (!p || !p->valid) continue;
         int quality = (int)(p->stabilityScore);
         if (quality < 0) quality = 0;
         if (quality > 100) quality = 100;
-        
-        int isActiveVal = 0;
-        if (!activeProfileSent && getActiveProfile() && getActiveProfile()->id == p->id) {
-            isActiveVal = 1;
-            activeProfileSent = true;
-        }
-        
-        int isDefaultVal = 0;
-        if (!defaultProfileSent && getDefaultProfileId() == p->id) {
-            isDefaultVal = 1;
-            defaultProfileSent = true;
-        }
-        
-        char item[128];
+
+        char item[96];
         snprintf(item, sizeof(item),
-                 "%s{\"id\":%lu,\"s\":%u,\"n\":\"%s\",\"a\":%d,\"d\":%d,\"c\":%lu,\"q\":%d}",
+                 "%s{\"id\":%lu,\"n\":\"%s\",\"c\":%lu,\"q\":%d}",
                  (profilesJson[1] == '\0') ? "" : ",",
                  (unsigned long)p->id,
-                 (unsigned)(i + 1),
                  p->name,
-                 isActiveVal,
-                 isDefaultVal,
                  (unsigned long)p->createdAtEpoch,
                  quality);
         strncat(profilesJson, item, sizeof(profilesJson) - strlen(profilesJson) - 1);
     }
     strncat(profilesJson, "]", sizeof(profilesJson) - strlen(profilesJson) - 1);
-    snprintf(payload, sizeof(payload), "{\"t\":\"P\",\"profiles\":%s,\"count\":%u,\"max\":8}", profilesJson, (unsigned)getProfileCount());
+    // Active/default are reported once by id ("active"/"default", 0 = system
+    // default) instead of per-profile flags.
+    const OrientationProfile* activeProfile = getActiveProfile();
+    snprintf(payload, sizeof(payload), "{\"t\":\"P\",\"profiles\":%s,\"count\":%u,\"max\":8,\"active\":%lu,\"default\":%lu}",
+             profilesJson,
+             (unsigned)getProfileCount(),
+             (unsigned long)(activeProfile ? activeProfile->id : 0u),
+             (unsigned long)getDefaultProfileId());
     sendBlePacket(payload);
 }
 
-static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint8_t slot = 0, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr, float refX = 0.0f, float refY = 0.0f, float refZ = 0.0f, uint16_t passedSamples = 0) {
+static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char* name = nullptr, uint16_t quality = 0, uint16_t samples = 0, const char* reason = nullptr, float refX = 0.0f, float refY = 0.0f, float refZ = 0.0f, uint16_t passedSamples = 0) {
     if (!pCharacteristic || !connected) return;
     char payload[320];
     if (success) {
         snprintf(payload, sizeof(payload),
-                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"save_state\":\"pending\",\"profile_id\":%lu,\"name\":\"%s\",\"slot\":%u,\"quality\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"total_samples\":%u,\"passed_samples\":%u}",
+                 "{\"t\":\"C\",\"state\":\"DONE\",\"result\":\"success\",\"save_state\":\"pending\",\"profile_id\":%lu,\"name\":\"%s\",\"quality\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f,\"total_samples\":%u,\"passed_samples\":%u}",
                  (unsigned long)profileId,
                  name ? name : "",
-                 (unsigned)slot,
                  (unsigned)quality,
                  refX,
                  refY,
@@ -839,8 +880,8 @@ static void sendCalibrationDone(bool success, uint32_t profileId = 0, const char
     sendBlePacket(payload);
 }
 
-void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint8_t slot, uint16_t quality, uint16_t sampleCount, const char* reason, float refX, float refY, float refZ, uint16_t passedSamples) {
-    sendCalibrationDone(success, profileId, name, slot, quality, sampleCount, reason, refX, refY, refZ, passedSamples);
+void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint16_t quality, uint16_t sampleCount, const char* reason, float refX, float refY, float refZ, uint16_t passedSamples) {
+    sendCalibrationDone(success, profileId, name, quality, sampleCount, reason, refX, refY, refZ, passedSamples);
 }
 
 void notifyCalibrationPersisted(uint32_t profileId, bool success, uint32_t totalMs, uint32_t flashMs) {
@@ -994,6 +1035,338 @@ static bool extractJsonIntField(const String& payload, const char* key, uint32_t
     return true;
 }
 
+static uint8_t extractJsonIntArray(const String& payload, const char* key,
+                                   uint16_t* out, uint8_t maxOut) {
+    String pattern = String("\"") + key + "\"";
+    int keyPos = payload.indexOf(pattern);
+    if (keyPos < 0) return 0;
+    int open = payload.indexOf('[', keyPos);
+    if (open < 0) return 0;
+    int close = payload.indexOf(']', open);
+    if (close < 0) return 0;
+
+    uint8_t n = 0;
+    int i = open + 1;
+    while (i < close && n < maxOut) {
+        while (i < close && !isdigit((unsigned char)payload[i])) i++;
+        if (i >= close) break;
+        int numStart = i;
+        while (i < close && isdigit((unsigned char)payload[i])) i++;
+        out[n++] = (uint16_t)payload.substring(numStart, i).toInt();
+    }
+    return n;
+}
+
+// ── Session sync FSM implementation ──────────────────────────────────────
+
+#if ALIGN_RTT_SYNC_LOG
+#define SYNC_LOG(...) rtt.printf(__VA_ARGS__)
+#else
+#define SYNC_LOG(...)
+#endif
+
+static unsigned long syncLastProgressMs = 0;
+static constexpr uint32_t SYNC_STALL_TIMEOUT_MS = 30000UL;
+
+static void syncReset() {
+    syncState = SyncState::Idle;
+    syncCount = 0;
+    syncEntryIdx = 0;
+    syncChunkIdx = 0;
+    syncSeq = 0;
+    syncRetxCount = 0;
+    syncRetxIdx = 0;
+    syncAckReceived = false;
+    syncAckOk = false;
+    syncFetchRequested = false;
+    syncEvLoadedFor = -1;
+    syncFastParamsActive = false;
+}
+
+static void syncRequestConnInterval(uint16_t intervalUnits) {
+    if (currentConnHandle == BLE_CONN_HANDLE_INVALID) return;
+    BLEConnection* conn = Bluefruit.Connection(currentConnHandle);
+    if (conn) conn->requestConnectionParameter(intervalUnits);
+}
+
+// Ends a transfer (committed, aborted, or timed out) and relaxes the
+// connection interval if we sped it up for streaming.
+static void syncFinish(const char* why) {
+    (void)why;
+    SYNC_LOG("[SYNC] finish: %s\n", why);
+    if (syncFastParamsActive) {
+        syncRequestConnInterval(SYNC_IDLE_CONN_INTERVAL);
+    }
+    syncReset();
+}
+
+// Loads event detail for one window entry into the shared cache and fills
+// in evCount/evChunks. Chunks are sized so every SEV packet fits a single
+// notification for the MTU captured at transfer start.
+static void syncLoadEvents(uint8_t idx) {
+    if (syncEvLoadedFor == (int)idx) return;
+    SyncEntry& e = syncWindow[idx];
+    e.evCount = 0;
+    e.evChunks = 0;
+
+    if (e.s.start_ts != 0) {
+        if (e.s.type == SESSION_TYPE_POSTURE &&
+            session_log_read_posture_events(e.s.start_ts, syncPostureEv)) {
+            e.evCount = syncPostureEv.pairCount;
+            e.evChunks = (e.evCount + syncPairsPerChunk - 1) / syncPairsPerChunk;
+        } else if (e.s.type == SESSION_TYPE_THERAPY &&
+                   session_log_read_therapy_events(e.s.start_ts, syncTherapyEv)) {
+            e.evCount = syncTherapyEv.count;
+            e.evChunks = (e.evCount + syncTherapyPerChunk - 1) / syncTherapyPerChunk;
+        }
+    }
+    syncEvLoadedFor = (int)idx;
+}
+
+static bool syncSendSummary(uint8_t idx, uint16_t seq) {
+    syncLoadEvents(idx);
+    const SyncEntry& e = syncWindow[idx];
+    char payload[192];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"SESS\",\"x\":%lu,\"q\":%u,\"ty\":%u,\"ts\":%lu,\"sy\":%u,"
+             "\"d\":%u,\"wc\":%u,\"wd\":%u,\"pat\":%u,\"ev\":%u,\"ec\":%u}",
+             (unsigned long)syncXferId, (unsigned)seq, (unsigned)e.s.type,
+             (unsigned long)e.s.start_ts, e.s.ts_synced ? 1u : 0u,
+             (unsigned)e.s.duration_sec, (unsigned)e.s.wrong_count,
+             (unsigned)e.s.wrong_dur_sec, (unsigned)e.s.therapy_pattern,
+             (unsigned)e.evCount, (unsigned)e.evChunks);
+    return sendBlePacket(payload);
+}
+
+static bool syncSendEventChunk(uint8_t idx, uint8_t chunk, uint16_t seq) {
+    syncLoadEvents(idx);
+    const SyncEntry& e = syncWindow[idx];
+    if (chunk >= e.evChunks) return true;  // nothing to send; treat as done
+
+    char payload[336];
+    int pos = snprintf(payload, sizeof(payload),
+                       "{\"t\":\"SEV\",\"x\":%lu,\"q\":%u,\"ts\":%lu,\"ty\":%u,"
+                       "\"i\":%u,\"n\":%u,\"e\":[",
+                       (unsigned long)syncXferId, (unsigned)seq,
+                       (unsigned long)e.s.start_ts, (unsigned)e.s.type,
+                       (unsigned)chunk, (unsigned)e.evChunks);
+
+    if (e.s.type == SESSION_TYPE_POSTURE) {
+        uint16_t first = (uint16_t)chunk * syncPairsPerChunk;
+        uint16_t last = first + syncPairsPerChunk;
+        if (last > e.evCount) last = e.evCount;
+        for (uint16_t i = first; i < last; i++) {
+            pos += snprintf(payload + pos, sizeof(payload) - pos, "%s[%u,%u]",
+                            (i == first) ? "" : ",",
+                            (unsigned)syncPostureEv.slouchOffsets[i],
+                            (unsigned)syncPostureEv.correctionOffsets[i]);
+        }
+    } else {
+        uint16_t first = (uint16_t)chunk * syncTherapyPerChunk;
+        uint16_t last = first + syncTherapyPerChunk;
+        if (last > e.evCount) last = e.evCount;
+        for (uint16_t i = first; i < last; i++) {
+            pos += snprintf(payload + pos, sizeof(payload) - pos, "%s%u",
+                            (i == first) ? "" : ",",
+                            (unsigned)syncTherapyEv.patterns[i]);
+        }
+    }
+    snprintf(payload + pos, sizeof(payload) - pos, "]}");
+    return sendBlePacket(payload);
+}
+
+// Retransmits one nacked seq by regenerating the packet from the window.
+// Unknown seqs are skipped (returns true) so a bad NACK can't wedge the FSM.
+static bool syncResendSeq(uint16_t seq) {
+    for (uint8_t i = 0; i < syncCount; i++) {
+        const SyncEntry& e = syncWindow[i];
+        if (seq < e.seqBase || seq > (uint16_t)(e.seqBase + e.evChunks)) continue;
+        if (seq == e.seqBase) return syncSendSummary(i, seq);
+        return syncSendEventChunk(i, (uint8_t)(seq - e.seqBase - 1), seq);
+    }
+    return true;
+}
+
+// Freezes the unsent window and starts a new transfer. Called from the main
+// loop only (file I/O + window copy are not BLE-callback safe).
+static void syncBeginTransfer() {
+    syncFetchRequested = false;
+    if (syncFastParamsActive) {
+        syncRequestConnInterval(SYNC_IDLE_CONN_INTERVAL);
+    }
+    syncReset();
+    if (!connected || !pCharacteristic) return;
+
+    uint16_t mtu = 23;
+    BLEConnection* conn = Bluefruit.Connection(currentConnHandle);
+    if (conn) mtu = conn->getMtu();
+
+    if (mtu < SYNC_MIN_MTU) {
+        char payload[96];
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"SESS_HDR\",\"x\":0,\"n\":0,\"err\":\"MTU_TOO_SMALL\",\"mtu\":%u}",
+                 (unsigned)mtu);
+        sendBlePacket(payload);
+        return;
+    }
+
+    // Chunk capacities fixed for the whole transfer: every packet must fit
+    // one notification so a failed notify() is retried cleanly (no tearing).
+    const uint16_t budget = (mtu - 3) - 84;      // usable minus JSON envelope
+    syncPairsPerChunk = budget / 14;             // "[65535,65535]," per pair
+    if (syncPairsPerChunk < 4) syncPairsPerChunk = 4;
+    if (syncPairsPerChunk > 16) syncPairsPerChunk = 16;
+    syncTherapyPerChunk = budget / 4;            // "255," per pattern
+    if (syncTherapyPerChunk < 8) syncTherapyPerChunk = 8;
+    if (syncTherapyPerChunk > MAX_THERAPY_PATTERNS) syncTherapyPerChunk = MAX_THERAPY_PATTERNS;
+
+    StoredSession s;
+    int fileIndex = 0;
+    while (syncCount < SYNC_MAX_WINDOW &&
+           session_log_get_unsent(syncCount, s, fileIndex)) {
+        syncWindow[syncCount].s = s;
+        syncWindow[syncCount].seqBase = 0;
+        syncWindow[syncCount].evCount = 0;
+        syncWindow[syncCount].evChunks = 0;
+        syncCount++;
+    }
+
+    syncXferId = millis() | 1u;  // nonzero transfer id
+    syncState = SyncState::Hdr;
+    syncLastProgressMs = millis();
+    SYNC_LOG("[SYNC] begin xfer=%lu window=%u mtu=%u pairs/chunk=%u\n",
+             (unsigned long)syncXferId, (unsigned)syncCount, (unsigned)mtu,
+             (unsigned)syncPairsPerChunk);
+}
+
+// Commits a fully-acked transfer: batch-marks the window sent (tiny marker
+// appends, flushed together by session_log_loop) and compacts the log only
+// once everything unsent has drained.
+static void syncCommitWindow() {
+    for (uint8_t i = 0; i < syncCount; i++) {
+        session_log_mark_sent_matching(syncWindow[i].s);
+    }
+    if (session_log_count_unsent() == 0) {
+        session_log_purge_sent();
+    }
+    SYNC_LOG("[SYNC] committed %u sessions, %d unsent remain\n",
+             (unsigned)syncCount, session_log_count_unsent());
+}
+
+// Advances the sync FSM by at most one packet per call. `txBusy` means a
+// higher-priority packet (telemetry/live) already used this tick.
+static void syncProcess(unsigned long now, bool txBusy) {
+    switch (syncState) {
+        case SyncState::Idle:
+            if (sessAvailPending && connected && !txBusy) {
+                char payload[64];
+                snprintf(payload, sizeof(payload),
+                         "{\"t\":\"SESS_AVAIL\",\"n\":%d}",
+                         session_log_count_unsent());
+                if (sendBlePacket(payload)) sessAvailPending = false;
+            }
+            return;
+
+        case SyncState::Hdr: {
+            if (txBusy) break;
+            char payload[96];
+            snprintf(payload, sizeof(payload),
+                     "{\"t\":\"SESS_HDR\",\"x\":%lu,\"n\":%u,\"total\":%d}",
+                     (unsigned long)syncXferId, (unsigned)syncCount,
+                     session_log_count_unsent());
+            if (!sendBlePacket(payload)) break;
+            syncLastProgressMs = now;
+            if (syncCount == 0) {
+                syncFinish("empty");
+                return;
+            }
+            syncRequestConnInterval(SYNC_FAST_CONN_INTERVAL);
+            syncFastParamsActive = true;
+            syncState = SyncState::Stream;
+            break;
+        }
+
+        case SyncState::Stream: {
+            if (txBusy) break;
+            SyncEntry& e = syncWindow[syncEntryIdx];
+            bool sent;
+            if (syncChunkIdx == 0) {
+                e.seqBase = syncSeq;
+                sent = syncSendSummary(syncEntryIdx, syncSeq);
+            } else {
+                sent = syncSendEventChunk(syncEntryIdx, syncChunkIdx - 1, syncSeq);
+            }
+            if (!sent) break;  // FIFO full or CCCD off: retry same seq next tick
+            syncLastProgressMs = now;
+            syncSeq++;
+            syncChunkIdx++;
+            if (syncChunkIdx > e.evChunks) {
+                syncChunkIdx = 0;
+                syncEntryIdx++;
+            }
+            if (syncEntryIdx >= syncCount) {
+                syncState = SyncState::End;
+            }
+            break;
+        }
+
+        case SyncState::End: {
+            if (txBusy) break;
+            char payload[96];
+            snprintf(payload, sizeof(payload),
+                     "{\"t\":\"SESS_END\",\"x\":%lu,\"pk\":%u,\"n\":%u}",
+                     (unsigned long)syncXferId, (unsigned)syncSeq,
+                     (unsigned)syncCount);
+            if (!sendBlePacket(payload)) break;
+            syncLastProgressMs = now;
+            syncAckWaitStartMs = now;
+            syncState = SyncState::WaitAck;
+            break;
+        }
+
+        case SyncState::WaitAck:
+            if (syncAckReceived) {
+                syncAckReceived = false;
+                syncLastProgressMs = now;
+                if (syncRetxCount > 0) {
+                    syncRetxIdx = 0;
+                    syncState = SyncState::Retx;
+                } else if (syncAckOk) {
+                    syncCommitWindow();
+                    syncFinish("acked");
+                } else {
+                    syncFinish("app_abort");  // ack without ok/nack = abort
+                }
+                return;
+            }
+            if ((now - syncAckWaitStartMs) >= SYNC_ACK_TIMEOUT_MS) {
+                syncFinish("ack_timeout");
+            }
+            return;
+
+        case SyncState::Retx: {
+            if (txBusy) break;
+            if (syncRetxIdx >= syncRetxCount) {
+                syncRetxCount = 0;
+                syncState = SyncState::End;
+                break;
+            }
+            if (syncResendSeq(syncRetxList[syncRetxIdx])) {
+                syncLastProgressMs = now;
+                syncRetxIdx++;
+            }
+            break;
+        }
+    }
+
+    // Stall guard: a transfer that makes no progress (e.g. notifications
+    // disabled mid-stream) is abandoned; nothing was marked, app re-fetches.
+    if (syncState != SyncState::Idle &&
+        (now - syncLastProgressMs) >= SYNC_STALL_TIMEOUT_MS) {
+        syncFinish("stalled");
+    }
+}
+
 static void parseAndApplyBleCommand(const String &payloadRaw) {
     String payload = payloadRaw;
     payload.trim();
@@ -1009,7 +1382,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
         const char* error = nullptr;
 
         if (hasCmd) {
-            if (cmd == "GET_PROFILES") {
+            if (cmd == "GET_CALIBRATION_PROFILE") {
                 pendingProfileListSend = true;
                 ok = true;
             } else if (cmd == "TRAINING_START") {
@@ -1035,22 +1408,16 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                     error = "NOT_CALIBRATING";
                 }
             } else if (cmd == "CALIBRATE_START") {
+                // A "slot" field may still arrive from older apps; it is ignored —
+                // profiles are addressed by id and placed automatically.
                 String profileName = "Profile";
-                String slotValue;
-                extractJsonStringField(payload, "slot", slotValue);
                 extractJsonStringField(payload, "name", profileName);
-                slotValue.trim();
-                slotValue.toUpperCase();
-                if (slotValue.length() == 0 || slotValue == "AUTO") {
-                    if (isCalibrating()) {
-                        error = "ALREADY_CALIBRATING";
-                    } else {
-                        setPendingCalibrationName(profileName.c_str());
-                        requestCalibrationStart();
-                        ok = true;
-                    }
+                if (isCalibrating()) {
+                    error = "ALREADY_CALIBRATING";
                 } else {
-                    error = "INVALID_SLOT";
+                    setPendingCalibrationName(profileName.c_str());
+                    requestCalibrationStart();
+                    ok = true;
                 }
             } else if (cmd == "PROFILE_SELECT") {
                 uint32_t id = 0u;
@@ -1147,6 +1514,27 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             } else if (cmd == "FACTORY_RESET") {
                 pendingFactoryReset = true;
                 ok = true;
+            } else if (cmd == "FETCH_SESSIONS") {
+                // Window freeze + streaming happen in bluetoothLoop(); a
+                // fetch during an active transfer restarts it (nothing has
+                // been marked sent yet, so no data can be lost).
+                syncFetchRequested = true;
+                ok = true;
+            } else if (cmd == "ACK_SESSIONS") {
+                uint32_t xfer = 0u;
+                if (syncState != SyncState::WaitAck) {
+                    error = "NOT_WAITING";
+                } else if (!extractJsonIntField(payload, "xfer", xfer) ||
+                           xfer != syncXferId) {
+                    error = "BAD_XFER";
+                } else {
+                    syncRetxCount = extractJsonIntArray(payload, "nack",
+                                                        syncRetxList, 16);
+                    syncAckOk = (syncRetxCount == 0) &&
+                                (payload.indexOf("\"ok\":true") >= 0);
+                    syncAckReceived = true;
+                    ok = true;
+                }
             } else {
                 error = "UNKNOWN_CMD";
             }
@@ -1205,7 +1593,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
     if (cmdName.length() > 0) {
         cmdName.trim();
         cmdName.toUpperCase();
-        if (cmdName == "GET_PROFILES") {
+        if (cmdName == "GET_CALIBRATION_PROFILE") {
             pendingProfileListSend = true;
         } else if (cmdName == "CALIBRATE_CANCEL") {
             if (isCalibrating()) {
@@ -1417,6 +1805,8 @@ void bluetoothLoop() {
             pCharacteristic != nullptr;
 
         if (canSendBle) {
+            bool sentPacketThisTick = false;
+
             // 1. L: Always send live posture packet every 150 ms
             if (forceLiveSync ||
                 lastLiveSendMs == 0 ||
@@ -1424,6 +1814,7 @@ void bluetoothLoop() {
                 forceLiveSync = false;
                 lastLiveSendMs = now;
                 sendLivePacket();
+                sentPacketThisTick = true;
             }
 
             // 2. T: Send pure training telemetry every 1000 ms in TRAINING mode, or on force sync
@@ -1434,6 +1825,7 @@ void bluetoothLoop() {
                 forceTelemetrySync = false;
                 lastTrainingTelemetrySendMs = now;
                 sendStatusTelemetry("loop", "training_1s");
+                sentPacketThisTick = true;
             }
 
             // 3. TL: Send therapy live progress every 1000 ms in THERAPY mode
@@ -1443,7 +1835,16 @@ void bluetoothLoop() {
                  ((now - lastTherapyLiveSendMs) >= THERAPY_LIVE_PACKET_INTERVAL_MS))) {
                 lastTherapyLiveSendMs = now;
                 sendTherapyLivePacket();
+                sentPacketThisTick = true;
             }
+
+            // 4. Session sync: at most one packet per tick, only on ticks
+            // telemetry didn't use. Works in any mode; live packets keep
+            // their cadence because they always win the tick.
+            if (syncFetchRequested) {
+                syncBeginTransfer();
+            }
+            syncProcess(now, sentPacketThisTick);
         }
     }
 
@@ -1622,5 +2023,10 @@ void bluetoothNotifyStateChanged() {
 }
 
 void notifyNewSessionStored() {
-    // Placeholder
+    // Called from the main loop right after a promoted session lands in the
+    // log. If the app is connected it gets a SESS_AVAIL hint on the next
+    // idle tick and can FETCH_SESSIONS immediately (live-to-stored handoff).
+    if (connected) {
+        sessAvailPending = true;
+    }
 }

@@ -19,14 +19,6 @@ struct CalibrationProfile {
 
 using OrientationProfile = CalibrationProfile;
 
-struct CalibrationSettings {
-    uint8_t version;
-    uint8_t activeProfileIndex;
-    uint8_t defaultProfileIndex;
-    CalibrationProfile profiles[8];
-    uint32_t crc;
-};
-
 bool addCalibrationProfile(const char* name);
 bool addNextCalibrationProfile();
 bool deleteCalibrationProfileById(uint32_t id);

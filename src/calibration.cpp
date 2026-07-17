@@ -104,7 +104,7 @@ static const char* calibrationQualityLabel(uint16_t quality) {
 
 static void calibrationStartBlocked(const char* reason) {
     logPacket("CALIB", reason ? reason : "START_BLOCKED");
-    notifyCalibrationComplete(false, 0u, "", 0u, 0u, 0u, reason ? reason : "START_BLOCKED");
+    notifyCalibrationComplete(false, 0u, "", 0u, 0u, reason ? reason : "START_BLOCKED");
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -138,7 +138,7 @@ static void calibrationFail(const char* reason) {
     calibState = CALIB_STATE_IDLE;
     isCalibrationRunning = false;
     notifyCalibrationStatus("failed", "done");
-    notifyCalibrationComplete(false, 0u, "", 0u, 0u, (uint16_t)totalSamples, reason);
+    notifyCalibrationComplete(false, 0u, "", 0u, (uint16_t)totalSamples, reason);
     goToIdleMode();
 
     // Calm, longer ring on failure — smooth ramp up/down, no hard buzz.
@@ -171,7 +171,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         calibState = CALIB_STATE_IDLE;
         isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
-        notifyCalibrationComplete(false, 0u, "", 0u, quality, passedSamples, "LOW_QUALITY");
+        notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "LOW_QUALITY");
         goToIdleMode();
 
         s_failVibEndMs = millis() + kCalibFailHapticMs;
@@ -203,7 +203,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         calibState = CALIB_STATE_IDLE;
         isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
-        notifyCalibrationComplete(false, 0u, "", 0u, quality, passedSamples, "PROFILE_SAVE_FAILED");
+        notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "PROFILE_SAVE_FAILED");
         goToIdleMode();
 
         s_failVibEndMs = millis() + kCalibFailHapticMs;
@@ -218,8 +218,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     calibResultSetAt = millis();
 
     const OrientationProfile* active = getActiveProfile();
-    const int activeIndex = getActiveProfileIndex();
-    const uint8_t slot = (activeIndex >= 0) ? (uint8_t)(activeIndex + 1) : 0u;
     const uint32_t profileId = active ? active->id : 0u;
     s_pendingPersistTicket = storageGetLatestDeferredPersistTicket();
     s_pendingPersistProfileId = profileId;
@@ -245,7 +243,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     notifyCalibrationComplete(true,
                               profileId,
                               active ? active->name : "",
-                              slot,
                               quality,
                               passedSamples,
                               nullptr,
