@@ -40,6 +40,7 @@ static bool forceLiveSync = false;
 static unsigned long lastLiveSendMs = 0;
 static unsigned long lastTrainingTelemetrySendMs = 0;
 static unsigned long lastTherapyLiveSendMs = 0;
+static unsigned long lastStatusSendMs = 0;
 
 static bool telemetryCacheValid = false;
 static char lastMode[12] = "";
@@ -110,6 +111,7 @@ static void syncReset();
 static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 500UL;
 static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
+static constexpr uint32_t STATUS_PACKET_INTERVAL_MS = 5000UL;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
@@ -326,6 +328,24 @@ static void sendLivePacket() {
     sendBlePacket(payload);
 }
 
+// STATUS: periodic device health packet — battery percentage plus the latest
+// raw accelerometer axes. Sent every STATUS_PACKET_INTERVAL_MS regardless of
+// mode so the app always has a fresh battery + orientation reading.
+static void sendStatusPacket() {
+    if (!pCharacteristic || !connected) return;
+
+    updatePostureAngle();  // refresh rawX/Y/Z from the sensor
+
+    char payload[128];
+    snprintf(payload, sizeof(payload),
+             "{\"t\":\"STATUS\",\"battery\":%u,\"x\":%.4f,\"y\":%.4f,\"z\":%.4f}",
+             (unsigned)batteryPercentage,
+             rawX,
+             rawY,
+             rawZ);
+    sendBlePacket(payload);
+}
+
 static void sendStatusTelemetry(const char* source = nullptr, const char* reason = nullptr) {
     (void)source;
     (void)reason;
@@ -535,6 +555,7 @@ static void onBleConnect(uint16_t conn_handle) {
     lastLiveSendMs = 0;
     lastTrainingTelemetrySendMs = 0;
     lastTherapyLiveSendMs = 0;
+    lastStatusSendMs = 0;
     connectedSinceMs = millis();
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
@@ -1838,7 +1859,18 @@ void bluetoothLoop() {
                 sentPacketThisTick = true;
             }
 
-            // 4. Session sync: at most one packet per tick, only on ticks
+            // 4. STATUS: battery + raw accelerometer axes every 5000 ms,
+            // in any mode (skipped during calibration to avoid disturbing
+            // the sensor sampling).
+            if (!isCalibrating() &&
+                (lastStatusSendMs == 0 ||
+                 ((now - lastStatusSendMs) >= STATUS_PACKET_INTERVAL_MS))) {
+                lastStatusSendMs = now;
+                sendStatusPacket();
+                sentPacketThisTick = true;
+            }
+
+            // 5. Session sync: at most one packet per tick, only on ticks
             // telemetry didn't use. Works in any mode; live packets keep
             // their cadence because they always win the tick.
             if (syncFetchRequested) {
