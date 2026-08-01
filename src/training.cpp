@@ -1,7 +1,6 @@
 #include "training.h"
 #include "button.h"
 #include "calibration.h"
-#include "sleep.h"
 #include "motor.h"
 #include "session_stats.h"
 #include "storage.h"
@@ -539,7 +538,6 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   }
 
   isTrainingMotorAlertActive = true;
-  inactivityTimerReset();
   const unsigned long vibInterval = 500UL;
   if ((now - s_vibToggleMs) >= vibInterval) {
     s_vibToggleMs = now;

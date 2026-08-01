@@ -2,7 +2,6 @@
 #include "config.h"
 #include "button.h"
 #include "calibration.h"
-#include "sleep.h"
 #include "therapy.h"
 #include "training.h"
 
@@ -43,10 +42,6 @@ static void applyDuty(uint8_t duty) {
     g_dutyApplied = duty;
     g_motorActive = duty != 0;
     refreshMotorActiveState(millis());
-    if (duty != 0u) {
-        inactivityTimerReset();
-    }
-
     // Use hardware PWM via analogWrite to prevent excessive startup current and brownout resets
     analogWrite(PIN_MOTOR, duty);
 }
@@ -117,7 +112,6 @@ void motorOverrideDuty(uint8_t duty, uint16_t durationMs) {
     g_calmDurationMs = 0;
     applyDuty(g_overrideDuty);
     refreshMotorActiveState(millis());
-    inactivityTimerReset();
 }
 
 void motorStartCalmHaptic(uint16_t durationMs) {
@@ -127,7 +121,6 @@ void motorStartCalmHaptic(uint16_t durationMs) {
     g_calmDurationMs = durationMs;
     applyDuty(0);
     refreshMotorActiveState(millis());
-    inactivityTimerReset();
 }
 
 void motorCancelCalmHaptic() {

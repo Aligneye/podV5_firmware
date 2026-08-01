@@ -47,4 +47,5 @@ void buttonSetup();
 void buttonLoop();
 void setDeviceMode(Mode newMode);
 void markSubModeChanged();
+bool buttonInteractionPending();
 
