@@ -2,7 +2,6 @@
 #include "button.h"
 #include "bluetooth.h"
 #include "calibration.h"
-#include "sleep.h"
 #include "motor.h"
 #include "session_stats.h"
 #include "rtt_debugger.h"
@@ -296,8 +295,6 @@ void therapyStart() {
     patternsInitialized = false;
     currentPatternIndex = 0;
     initializePatternSequence();
-    inactivityTimerReset();
-
     rtt.print("Therapy: starting — sub-mode ");
     rtt.print((int)therapySubModeIndex);
     rtt.print(" (");

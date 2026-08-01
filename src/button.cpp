@@ -225,3 +225,7 @@ void buttonLoop() {
     }
   }
 }
+
+bool buttonInteractionPending() {
+  return !btn.isIdle();
+}

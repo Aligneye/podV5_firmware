@@ -1,7 +1,6 @@
 #include "calibration.h"
 #include "bluetooth.h"
 #include "button.h"
-#include "sleep.h"
 #include "motor.h"
 #include "therapy.h"
 #include "training.h"
@@ -146,7 +145,6 @@ static void calibrationFail(const char* reason) {
     s_failVibEndMs = millis() + kCalibFailHapticMs;
     motorStartCalmHaptic(kCalibFailHapticMs);
 
-    inactivityTimerHoldoffAfterCalibration();
 }
 
 static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples,
@@ -177,7 +175,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_failVibEndMs = millis() + kCalibFailHapticMs;
         motorStartCalmHaptic(kCalibFailHapticMs);
 
-        inactivityTimerHoldoffAfterCalibration();
         return;
     }
 
@@ -209,7 +206,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         s_failVibEndMs = millis() + kCalibFailHapticMs;
         motorStartCalmHaptic(kCalibFailHapticMs);
 
-        inactivityTimerHoldoffAfterCalibration();
         return;
     }
 
@@ -260,7 +256,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
     s_successPulseEndMs = millis() + kCalibSuccessHapticMs;
     motorStartCalmHaptic(kCalibSuccessHapticMs);
 
-    inactivityTimerHoldoffAfterCalibration();
 }
 
 static CalibrationStats calculateCalibrationStats(int sampleLimit) {
@@ -586,8 +581,6 @@ void startCalibration() {
     stabilityStartTime = millis();
     lastHoldPrintMs    = millis();
     s_lastBleProgressMs = stabilityStartTime;
-    inactivityTimerReset();
-
     totalSamples = 0;
 
     s_lastSampleTime = millis();

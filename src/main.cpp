@@ -41,7 +41,7 @@ void setup() {
     calibrationSetup();
     bluetoothSetup();
     initDeviceTime();
-    inactivityTimerSetup();
+    sleepTimerSetup();
 }
 
 void loop() {
@@ -51,7 +51,7 @@ void loop() {
     calibrationLoop();
     storageLoop();
     session_log_loop();
-    inactivityTimerLoop();
+    sleepTimerLoop();
     rttDebuggerLoop();
     if (currentMode == MODE_IDLE || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {
         return;
@@ -60,7 +60,6 @@ void loop() {
     // Training first: posture motor is authoritative unless calibration idle-handler
     // applies short success/fail buzz afterward (see calibration.cpp).
     trainingLoop();
-    inactivityTimerLoop();
     maintainDeviceTime();
     updateSessionStats();
     maintainSessionStats();
