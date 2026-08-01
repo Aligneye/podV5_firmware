@@ -15,7 +15,7 @@ static AlignRttSilencer s_nonBleRtt;
 static uint32_t s_timerStartedMs = 0;
 static bool s_timerRunning = false;
 static bool s_sleeping = false;
-static constexpr uint32_t kIdleDisconnectedSleepTimeoutMs = 5000UL;
+static constexpr uint32_t kIdleDisconnectedSleepTimeoutMs = 300000UL;
 static constexpr uint16_t kSleepLedBlinkOnMs = 80;
 static constexpr uint16_t kSleepLedBlinkGapMs = 40;
 static constexpr uint16_t kSleepMotorPulseMs = 120;
