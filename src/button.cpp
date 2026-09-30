@@ -38,13 +38,6 @@ static bool trainingStarted = false;
 // OneButton instance: active LOW, internal pull-up enabled
 static OneButton btn(PIN_BUTTON, true, true);
 
-static void playButtonPressHaptic() {
-  DEBUG_PRINTLN("Button press");
-  if (calibrationMotorActive())
-    return;
-  motorOverrideDuty(130, 70);
-}
-
 void markSubModeChanged() {
   lastModeChangeMs = millis();
   lastModeChangeDelayMs = SUBMODE_SWITCH_DELAY_MS;
@@ -103,7 +96,11 @@ static void handleSingleClick() {
   // from anywhere else (Idle, Therapy), click goes to Training.
   // Calibration only ever runs from Idle, so this always resolves to Training,
   // and setDeviceMode() cancels the in-progress calibration as a side effect.
+  Mode previousMode = currentMode;
   setDeviceMode(currentMode == MODE_TRAINING ? MODE_IDLE : MODE_TRAINING);
+  if (currentMode != previousMode) {
+    bluetoothRequestBatteryStatusBlink();
+  }
 }
 
 static void handleDoubleClick() {
@@ -115,13 +112,11 @@ static void handleDoubleClick() {
     return;
   }
 
-  // Play haptic feedback for the double click event
-  playButtonPressHaptic();
-
   switch (currentMode) {
   case MODE_TRAINING:
     trainingSubModeIndex = static_cast<TrainingAlertStyle>((static_cast<uint8_t>(trainingSubModeIndex) + 1) % TRAINING_SUBMODE_COUNT);
     markSubModeChanged();
+    bluetoothRequestBatteryStatusBlink();
     DEBUG_PRINT("Training Sub-Mode: ");
     DEBUG_PRINTLN(trainingSubModes[static_cast<uint8_t>(trainingSubModeIndex)]);
     break;
@@ -132,6 +127,7 @@ static void handleDoubleClick() {
     therapySubModeIndex = (therapySubModeIndex + 1) % THERAPY_SUBMODE_COUNT;
     storageSaveTherapySubMode(therapySubModeIndex);
     markSubModeChanged();
+    bluetoothRequestBatteryStatusBlink();
 
     DEBUG_PRINT("Therapy Sub-Mode changed: ");
     DEBUG_PRINTLN(therapySubModes[therapySubModeIndex]);
@@ -178,12 +174,15 @@ static void handleHold() {
 
   // Universal: hold always goes to Therapy, regardless of current mode.
   // setDeviceMode() cancels an in-progress calibration as a side effect.
+  Mode previousMode = currentMode;
   setDeviceMode(MODE_THERAPY);
+  if (currentMode != previousMode) {
+    bluetoothRequestBatteryStatusBlink();
+  }
 }
 
 void buttonSetup() {
   // Bind callbacks to OneButton
-  btn.attachPress(playButtonPressHaptic);
   btn.attachClick(handleSingleClick);
   btn.attachDoubleClick(handleDoubleClick);
   btn.attachMultiClick(handleMultiClick);

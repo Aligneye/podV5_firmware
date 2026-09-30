@@ -41,6 +41,8 @@ static unsigned long lastLiveSendMs = 0;
 static unsigned long lastTrainingTelemetrySendMs = 0;
 static unsigned long lastTherapyLiveSendMs = 0;
 static unsigned long lastStatusSendMs = 0;
+static unsigned long bleLinkSettleStartMs = 0;
+static bool bleLinkSettleActive = false;
 
 static bool telemetryCacheValid = false;
 static char lastMode[12] = "";
@@ -107,11 +109,14 @@ static TherapyEventReadResult syncTherapyEv;
 static int syncEvLoadedFor = -1;
 
 static void syncReset();
+static void onBleRawEvent(ble_evt_t* evt);
+static void onBleCccdWrite(uint16_t conn_handle, BLECharacteristic* chr, uint16_t value);
 
 static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 500UL;
 static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t STATUS_PACKET_INTERVAL_MS = 5000UL;
+static constexpr uint32_t BLE_LINK_SETTLE_MS = 5000UL;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
@@ -122,8 +127,28 @@ static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void updateBatteryReading(unsigned long now);
 
+static bool bleApplicationTxAllowed(unsigned long now) {
+    if (!connected) return false;
+    if (!bleLinkSettleActive) return true;
+    if ((uint32_t)(now - bleLinkSettleStartMs) < BLE_LINK_SETTLE_MS) {
+        return false;
+    }
+
+    bleLinkSettleActive = false;
+    forceTelemetrySync = true;
+    forceLiveSync = true;
+    lastLiveSendMs = 0;
+    lastTrainingTelemetrySendMs = 0;
+    lastTherapyLiveSendMs = 0;
+    lastStatusSendMs = 0;
+    rtt.printf("[BLEL] %lu APP_TX_OPEN h=%u\n", now, currentConnHandle);
+    return true;
+}
+
 static bool sendBlePacket(const char* payload) {
-    if (!pCharacteristic || !payload) return false;
+    if (!pCharacteristic || !payload || !bleApplicationTxAllowed(millis())) {
+        return false;
+    }
     pCharacteristic->write(payload);
     const bool notified = pCharacteristic->notify(payload);
     if (!notified && connected) {
@@ -421,6 +446,152 @@ static const char* bleDisconnectReasonText(uint8_t reason) {
     }
 }
 
+// Compact link-setup trace. Connection intervals are in 1.25 ms units and
+// supervision timeouts are in 10 ms units. Keep this callback lightweight:
+// it runs from Bluefruit's BLE event path and is intended only for RTT capture.
+static void onBleRawEvent(ble_evt_t* evt) {
+    if (!evt) return;
+
+    const unsigned long now = millis();
+    const uint16_t handle = evt->evt.common_evt.conn_handle;
+
+    switch (evt->header.evt_id) {
+        case BLE_GAP_EVT_CONNECTED: {
+            const ble_gap_conn_params_t& p =
+                evt->evt.gap_evt.params.connected.conn_params;
+            rtt.printf("[BLEL] %lu CON h=%u i=%u lat=%u to=%u\n",
+                       now, handle, p.max_conn_interval, p.slave_latency,
+                       p.conn_sup_timeout);
+            break;
+        }
+
+        case BLE_GAP_EVT_DISCONNECTED:
+            rtt.printf("[BLEL] %lu DIS h=%u r=0x%02X\n", now, handle,
+                       evt->evt.gap_evt.params.disconnected.reason);
+            break;
+
+        case BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST: {
+            const ble_gap_conn_params_t& p =
+                evt->evt.gap_evt.params.conn_param_update_request.conn_params;
+            rtt.printf("[BLEL] %lu CP_REQ h=%u i=%u-%u lat=%u to=%u\n",
+                       now, handle, p.min_conn_interval, p.max_conn_interval,
+                       p.slave_latency, p.conn_sup_timeout);
+            break;
+        }
+
+        case BLE_GAP_EVT_CONN_PARAM_UPDATE: {
+            const ble_gap_conn_params_t& p =
+                evt->evt.gap_evt.params.conn_param_update.conn_params;
+            rtt.printf("[BLEL] %lu CP_OK h=%u i=%u lat=%u to=%u\n",
+                       now, handle, p.max_conn_interval, p.slave_latency,
+                       p.conn_sup_timeout);
+            break;
+        }
+
+        case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
+            rtt.printf("[BLEL] %lu SEC_REQ h=%u\n", now, handle);
+            break;
+
+        case BLE_GAP_EVT_SEC_INFO_REQUEST:
+            rtt.printf("[BLEL] %lu KEY_REQ h=%u\n", now, handle);
+            break;
+
+        case BLE_GAP_EVT_AUTH_STATUS: {
+            const ble_gap_evt_auth_status_t& s =
+                evt->evt.gap_evt.params.auth_status;
+            rtt.printf("[BLEL] %lu AUTH h=%u st=0x%02X bond=%u lesc=%u src=%u\n",
+                       now, handle, s.auth_status, s.bonded, s.lesc,
+                       s.error_src);
+            break;
+        }
+
+        case BLE_GAP_EVT_CONN_SEC_UPDATE: {
+            const ble_gap_conn_sec_t& s =
+                evt->evt.gap_evt.params.conn_sec_update.conn_sec;
+            rtt.printf("[BLEL] %lu SEC_OK h=%u sm=%u lv=%u key=%u\n",
+                       now, handle, s.sec_mode.sm, s.sec_mode.lv,
+                       s.encr_key_size);
+            break;
+        }
+
+        case BLE_GAP_EVT_PHY_UPDATE_REQUEST: {
+            const ble_gap_phys_t& p =
+                evt->evt.gap_evt.params.phy_update_request.peer_preferred_phys;
+            rtt.printf("[BLEL] %lu PHY_REQ h=%u tx=%u rx=%u\n",
+                       now, handle, p.tx_phys, p.rx_phys);
+            break;
+        }
+
+        case BLE_GAP_EVT_PHY_UPDATE: {
+            const ble_gap_evt_phy_update_t& p =
+                evt->evt.gap_evt.params.phy_update;
+            rtt.printf("[BLEL] %lu PHY_OK h=%u st=0x%02X tx=%u rx=%u\n",
+                       now, handle, p.status, p.tx_phy, p.rx_phy);
+            break;
+        }
+
+        case BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST: {
+            const ble_gap_data_length_params_t& p =
+                evt->evt.gap_evt.params.data_length_update_request.peer_params;
+            rtt.printf("[BLEL] %lu DL_REQ h=%u tx=%u rx=%u\n",
+                       now, handle, p.max_tx_octets, p.max_rx_octets);
+            break;
+        }
+
+        case BLE_GAP_EVT_DATA_LENGTH_UPDATE: {
+            const ble_gap_data_length_params_t& p =
+                evt->evt.gap_evt.params.data_length_update.effective_params;
+            rtt.printf("[BLEL] %lu DL_OK h=%u tx=%u rx=%u\n",
+                       now, handle, p.max_tx_octets, p.max_rx_octets);
+            break;
+        }
+
+        case BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST: {
+            const uint16_t requested =
+                evt->evt.gatts_evt.params.exchange_mtu_request.client_rx_mtu;
+            BLEConnection* conn = Bluefruit.Connection(handle);
+            const uint16_t active = conn ? conn->getMtu() : 0;
+            rtt.printf("[BLEL] %lu MTU_REQ h=%u req=%u now=%u\n",
+                       now, handle, requested, active);
+            break;
+        }
+
+        case BLE_GATTC_EVT_EXCHANGE_MTU_RSP:
+            rtt.printf("[BLEL] %lu MTU_RSP h=%u mtu=%u\n", now, handle,
+                       evt->evt.gattc_evt.params.exchange_mtu_rsp.server_rx_mtu);
+            break;
+
+        case BLE_GAP_EVT_TIMEOUT:
+            rtt.printf("[BLEL] %lu GAP_TO h=%u src=%u\n", now, handle,
+                       evt->evt.gap_evt.params.timeout.src);
+            break;
+
+        case BLE_GATTS_EVT_TIMEOUT:
+            rtt.printf("[BLEL] %lu GATTS_TO h=%u src=%u\n", now, handle,
+                       evt->evt.gatts_evt.params.timeout.src);
+            break;
+
+        case BLE_GATTC_EVT_TIMEOUT:
+            rtt.printf("[BLEL] %lu GATTC_TO h=%u src=%u\n", now, handle,
+                       evt->evt.gattc_evt.params.timeout.src);
+            break;
+
+        case BLE_GATTS_EVT_SYS_ATTR_MISSING:
+            rtt.printf("[BLEL] %lu SYS_ATTR h=%u\n", now, handle);
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void onBleCccdWrite(uint16_t conn_handle, BLECharacteristic* chr,
+                           uint16_t value) {
+    (void)chr;
+    rtt.printf("[BLEL] %lu CCCD h=%u v=0x%04X\n",
+               millis(), conn_handle, value);
+}
+
 static void setRgbLedPwm(uint8_t red, uint8_t green, uint8_t blue) {
     analogWrite(PIN_LED_RED, 255 - red);
     analogWrite(PIN_LED_GREEN, 255 - green);
@@ -541,7 +712,8 @@ static void startAdvertising() {
     Bluefruit.Advertising.restartOnDisconnect(true);
     Bluefruit.Advertising.setInterval(32, 244); // 20ms fast, 152.5ms slow
     Bluefruit.Advertising.setFastTimeout(30);
-    Bluefruit.Advertising.start(0); // Advertise forever
+    const bool started = Bluefruit.Advertising.start(0); // Advertise forever
+    rtt.printf("[BLEL] %lu ADV start=%u\n", millis(), started ? 1u : 0u);
 }
 
 static void onBleConnect(uint16_t conn_handle) {
@@ -557,6 +729,11 @@ static void onBleConnect(uint16_t conn_handle) {
     lastTherapyLiveSendMs = 0;
     lastStatusSendMs = 0;
     connectedSinceMs = millis();
+    bleLinkSettleStartMs = connectedSinceMs;
+    bleLinkSettleActive = true;
+    rtt.printf("[BLEL] %lu APP_TX_HOLD h=%u ms=%lu\n",
+               connectedSinceMs, conn_handle,
+               (unsigned long)BLE_LINK_SETTLE_MS);
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
     syncReset();
@@ -564,8 +741,11 @@ static void onBleConnect(uint16_t conn_handle) {
     // both are polite requests the phone may decline (S132 supports both).
     BLEConnection* conn = Bluefruit.Connection(conn_handle);
     if (conn) {
-        conn->requestDataLengthUpdate();
-        conn->requestPHY();
+        const bool dlRequested = conn->requestDataLengthUpdate();
+        const bool phyRequested = conn->requestPHY();
+        rtt.printf("[BLEL] %lu LOCAL_REQ h=%u dl=%u phy=%u\n",
+                   millis(), conn_handle, dlRequested ? 1u : 0u,
+                   phyRequested ? 1u : 0u);
     }
     turnRgbLedOff();
     // RTT trace intentionally disabled here.
@@ -577,6 +757,7 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)conn_handle;
     connected = false;
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
+    bleLinkSettleActive = false;
     // Abandon any in-flight transfer: nothing was marked sent, so the whole
     // window simply re-streams on the next FETCH_SESSIONS.
     syncReset();
@@ -1716,6 +1897,7 @@ void bluetoothSetup() {
     if (!bleInitialized) {
         Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
         Bluefruit.begin(1, 0);
+        Bluefruit.setEventCallback(onBleRawEvent);
         Bluefruit.autoConnLed(false); // Disable auto LED blinking on PIN_LED1/PIN_LED2 (P0.17/P0.19)
         Bluefruit.setName(BLE_DEVICE_NAME);
         Bluefruit.setTxPower(4); // dBm
@@ -1735,6 +1917,7 @@ void bluetoothSetup() {
         gCharacteristic.setPermission(SECMODE_ENC_NO_MITM, SECMODE_ENC_NO_MITM);
         gCharacteristic.setMaxLen(512);
         gCharacteristic.setWriteCallback(onCharacteristicWrite);
+        gCharacteristic.setCccdWriteCallback(onBleCccdWrite, false);
         gCharacteristic.begin();
         rttDebuggerPrintBlePacket("TX", "{}");
 
@@ -1748,7 +1931,10 @@ void bluetoothSetup() {
 void bluetoothLoop() {
     if (!pCharacteristic) return;
 
-    if (pendingProfileListSend && connected) {
+    const unsigned long now = millis();
+    const bool appTxAllowed = bleApplicationTxAllowed(now);
+
+    if (pendingProfileListSend && appTxAllowed) {
         pendingProfileListSend = false;
         sendProfileList();
     }
@@ -1762,7 +1948,6 @@ void bluetoothLoop() {
         return;
     }
 
-    unsigned long now = millis();
     if (connected && connectionHapticPending && !connectionHapticPlayed &&
         connectedSinceMs != 0UL &&
         (now - connectedSinceMs) >= CONNECTION_HAPTIC_DELAY_MS) {
@@ -1808,7 +1993,7 @@ void bluetoothLoop() {
         forceTelemetrySync = true;
     }
 
-    if (connected) {
+    if (appTxAllowed) {
         if (runningNow) {
             const uint32_t sid = therapyGetSessionId();
             if (!therapyPlanSentForSession || lastTherapyPlanSessionId != sid) {
@@ -1821,9 +2006,7 @@ void bluetoothLoop() {
             lastTherapyPlanSessionId = 0;
         }
 
-        const bool canSendBle =
-            connected &&
-            pCharacteristic != nullptr;
+        const bool canSendBle = pCharacteristic != nullptr;
 
         if (canSendBle) {
             bool sentPacketThisTick = false;
@@ -2022,6 +2205,7 @@ void bluetoothUnlockForPairing() {
     connectionHapticPlayed = false;
     disconnectionHapticPending = false;
     connectedSinceMs = 0UL;
+    bleLinkSettleActive = false;
     saveBlePairMarker(false);
 
     Bluefruit.Advertising.restartOnDisconnect(true);
