@@ -719,7 +719,7 @@ static void startAdvertising() {
 static void onBleConnect(uint16_t conn_handle) {
     currentConnHandle = conn_handle;
     connected = true;
-    connectionHapticPending = true;
+    connectionHapticPending = BLE_CONNECTION_HAPTIC_ENABLED != 0;
     connectionHapticPlayed = false;
     disconnectionHapticPending = false;
     forceTelemetrySync = true;
@@ -737,14 +737,23 @@ static void onBleConnect(uint16_t conn_handle) {
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
     syncReset();
-    // Bigger link-layer packets + 2M PHY make session sync ~3-6x faster;
-    // both are polite requests the phone may decline (S132 supports both).
+    // Optional link optimizations are independently switchable for phone
+    // compatibility testing. Neither request is required to keep BLE connected.
     BLEConnection* conn = Bluefruit.Connection(conn_handle);
     if (conn) {
-        const bool dlRequested = conn->requestDataLengthUpdate();
-        const bool phyRequested = conn->requestPHY();
-        rtt.printf("[BLEL] %lu LOCAL_REQ h=%u dl=%u phy=%u\n",
-                   millis(), conn_handle, dlRequested ? 1u : 0u,
+        bool dlRequested = false;
+        bool phyRequested = false;
+#if BLE_REQUEST_DATA_LENGTH_ON_CONNECT
+        dlRequested = conn->requestDataLengthUpdate();
+#endif
+#if BLE_REQUEST_PHY_ON_CONNECT
+        phyRequested = conn->requestPHY();
+#endif
+        rtt.printf("[BLEL] %lu LOCAL_REQ h=%u dl=%u/%u phy=%u/%u\n",
+                   millis(), conn_handle,
+                   (unsigned)BLE_REQUEST_DATA_LENGTH_ON_CONNECT,
+                   dlRequested ? 1u : 0u,
+                   (unsigned)BLE_REQUEST_PHY_ON_CONNECT,
                    phyRequested ? 1u : 0u);
     }
     turnRgbLedOff();
@@ -801,7 +810,7 @@ static void onBleSecured(uint16_t conn_handle) {
     (void)conn_handle;
     blePairingKnownPaired = true;
     pairingUnlockActive = false;
-    connectionHapticPending = true;
+    connectionHapticPending = BLE_CONNECTION_HAPTIC_ENABLED != 0;
     saveBlePairMarker(true);
     rtt.println("[BLE SEC] link encrypted");
 }
@@ -1897,10 +1906,21 @@ void bluetoothSetup() {
     if (!bleInitialized) {
         Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
         Bluefruit.begin(1, 0);
+        const bool supervisionConfigured =
+            Bluefruit.Periph.setConnSupervisionTimeoutMS(
+                BLE_PREFERRED_SUPERVISION_TIMEOUT_MS);
         Bluefruit.setEventCallback(onBleRawEvent);
         Bluefruit.autoConnLed(false); // Disable auto LED blinking on PIN_LED1/PIN_LED2 (P0.17/P0.19)
         Bluefruit.setName(BLE_DEVICE_NAME);
         Bluefruit.setTxPower(4); // dBm
+        rtt.printf("[BLEL] %lu CFG dl=%u phy=%u hold=%lu sup=%lu haptic=%u ppcp=%u\n",
+                   millis(),
+                   (unsigned)BLE_REQUEST_DATA_LENGTH_ON_CONNECT,
+                   (unsigned)BLE_REQUEST_PHY_ON_CONNECT,
+                   (unsigned long)BLE_LINK_SETTLE_MS,
+                   (unsigned long)BLE_PREFERRED_SUPERVISION_TIMEOUT_MS,
+                   (unsigned)BLE_CONNECTION_HAPTIC_ENABLED,
+                   supervisionConfigured ? 1u : 0u);
         Bluefruit.Periph.setConnectCallback(onBleConnect);
         Bluefruit.Periph.setDisconnectCallback(onBleDisconnect);
         // The pod has no display or keyboard, so use bonded Just Works pairing
