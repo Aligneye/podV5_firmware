@@ -65,9 +65,8 @@ When the timeout expires, the firmware:
 3. stops advertising and prepares BLE for shutdown
 4. puts the posture sensor into low power
 5. blinks red, blue, and green
-6. plays the sleep motor pulse
-7. releases the LED and motor pins
-8. calls the Adafruit core's `systemOff(PIN_BUTTON, LOW)` helper
+6. releases the LED and motor pins
+7. calls the Adafruit core's `systemOff(PIN_BUTTON, LOW)` helper
 
 The framework helper configures the button with a pull-up and low-level GPIO
 SENSE, maps the Arduino pin to the physical GPIO, and enters System OFF through

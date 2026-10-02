@@ -55,6 +55,22 @@
 #define BLE_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define BLE_DEVICE_NAME         "align pod"
 
+// Connection-setup compatibility test profile.
+// Keep optional local DLE/PHY procedures out of the initial connection.
+// The phone may still initiate either procedure, which the SoftDevice handles.
+#ifndef BLE_REQUEST_DATA_LENGTH_ON_CONNECT
+#define BLE_REQUEST_DATA_LENGTH_ON_CONNECT 0
+#endif
+#ifndef BLE_REQUEST_PHY_ON_CONNECT
+#define BLE_REQUEST_PHY_ON_CONNECT         0
+#endif
+#ifndef BLE_PREFERRED_SUPERVISION_TIMEOUT_MS
+#define BLE_PREFERRED_SUPERVISION_TIMEOUT_MS 5000UL
+#endif
+#ifndef BLE_CONNECTION_HAPTIC_ENABLED
+#define BLE_CONNECTION_HAPTIC_ENABLED      0
+#endif
+
 // ── Session sync over BLE ──────────────────────────────────
 // Sessions per FETCH_SESSIONS transfer window. The app repeats FETCH until
 // SESS_HDR reports n=0, so this only bounds RAM (window copies) per round.

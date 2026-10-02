@@ -15,11 +15,9 @@ static AlignRttSilencer s_nonBleRtt;
 static uint32_t s_timerStartedMs = 0;
 static bool s_timerRunning = false;
 static bool s_sleeping = false;
-static constexpr uint32_t kIdleDisconnectedSleepTimeoutMs = 300000UL;
+static constexpr uint32_t kIdleDisconnectedSleepTimeoutMs = 120000UL;
 static constexpr uint16_t kSleepLedBlinkOnMs = 80;
 static constexpr uint16_t kSleepLedBlinkGapMs = 40;
-static constexpr uint16_t kSleepMotorPulseMs = 120;
-static constexpr uint16_t kSleepMotorSettleMs = 20;
 
 static void setSleepLedState(bool redOn, bool greenOn, bool blueOn) {
     analogWrite(PIN_LED_RED, redOn ? 0 : 255);
@@ -39,13 +37,6 @@ static void blinkSleepLed(bool redOn, bool greenOn, bool blueOn) {
     delay(kSleepLedBlinkOnMs);
     setSleepLedState(false, false, false);
     delay(kSleepLedBlinkGapMs);
-}
-
-static void pulseMotorForSleep() {
-    motorSetDuty(VIB_INTENSITY_MAX);
-    delay(kSleepMotorPulseMs);
-    motorSetDuty(0);
-    delay(kSleepMotorSettleMs);
 }
 
 static void hardReleaseMotor() {
@@ -82,7 +73,6 @@ static void enterSleepMode() {
     blinkSleepLed(false, true, false);
     hardReleaseSleepLeds();
 
-    pulseMotorForSleep();
     hardReleaseMotor();
 
     rtt.println("Entering System OFF");

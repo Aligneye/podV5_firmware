@@ -58,16 +58,19 @@ uint8_t BatteryMonitor::getBatteryPercentage()
 
 uint8_t BatteryMonitor::voltageToPercentage(float voltage)
 {
+    // Approximate resting-voltage curve for a single-cell Li-ion battery.
+    // Keep 3.50 V as the usable floor because the 3.3 V LDO has little
+    // regulation headroom below this point.
     if (voltage >= 4.15f) return 100;
-    if (voltage >= 4.05f) return 90;
-    if (voltage >= 3.95f) return 80;
-    if (voltage >= 3.87f) return 70;
-    if (voltage >= 3.80f) return 60;
-    if (voltage >= 3.74f) return 50;
-    if (voltage >= 3.68f) return 40;
-    if (voltage >= 3.60f) return 30;
-    if (voltage >= 3.50f) return 20;
-    if (voltage >= 3.40f) return 10;
+    if (voltage >= 4.08f) return 90;
+    if (voltage >= 4.00f) return 80;
+    if (voltage >= 3.92f) return 70;
+    if (voltage >= 3.85f) return 60;
+    if (voltage >= 3.79f) return 50;
+    if (voltage >= 3.74f) return 40;
+    if (voltage >= 3.69f) return 30;
+    if (voltage >= 3.62f) return 20;
+    if (voltage >= 3.50f) return 10;
 
     return 0;
 }
