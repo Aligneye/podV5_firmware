@@ -123,7 +123,7 @@ Purpose: Stops the therapy session.
 Working:
 Stops motor vibration
 Sets therapy state to idle
-Optionally switches device back to Training mode
+Optionally switches device back to Idle mode
 Ends therapy statistics
 
 13. 📌 therapyLoop()

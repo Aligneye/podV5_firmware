@@ -28,7 +28,7 @@ const char *therapySubModes[] = {"10 min", "20 min", "30 min"};
 bool deviceOn = true;
 Mode currentMode = MODE_IDLE;
 TrainingAlertStyle trainingSubModeIndex = TrainingAlertStyle::Instant;
-uint8_t therapySubModeIndex = 0;
+uint8_t therapySubModeIndex = 1; // Therapy duration is fixed at 20 minutes.
 unsigned long lastModeChangeMs = 0;
 unsigned long lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
@@ -58,7 +58,7 @@ void setDeviceMode(Mode newMode) {
   // 1. Stop active tasks in the PREVIOUS mode immediately
   if (currentMode == MODE_TRAINING) {
     trainingStop();
-  } else if (currentMode == MODE_THERAPY) {
+  } else if (currentMode == MODE_THERAPY && therapyIsRunning()) {
     therapyStop(false);
   }
 
@@ -92,12 +92,12 @@ static void handleSingleClick() {
     DEBUG_PRINTLN("Button click detected during calibration - canceling and shifting to Training");
   }
 
-  // Training <-> Idle toggle: from Training, click returns to Idle;
-  // from anywhere else (Idle, Therapy), click goes to Training.
-  // Calibration only ever runs from Idle, so this always resolves to Training,
-  // and setDeviceMode() cancels the in-progress calibration as a side effect.
+  // Idle <-> Training toggle. A click in Therapy always stops the session and
+  // returns to Idle; starting Therapy is reserved for a hold.
+  // Calibration only ever runs from Idle, so a click during calibration cancels
+  // it and enters Training as a side effect of setDeviceMode().
   Mode previousMode = currentMode;
-  setDeviceMode(currentMode == MODE_TRAINING ? MODE_IDLE : MODE_TRAINING);
+  setDeviceMode(currentMode == MODE_IDLE ? MODE_TRAINING : MODE_IDLE);
   if (currentMode != previousMode) {
     bluetoothRequestBatteryStatusBlink();
   }
@@ -122,15 +122,16 @@ static void handleDoubleClick() {
     break;
 
   case MODE_THERAPY:
-    // Stop session but stay in Therapy mode, then apply new duration
-    therapyStop(false);
-    therapySubModeIndex = (therapySubModeIndex + 1) % THERAPY_SUBMODE_COUNT;
-    storageSaveTherapySubMode(therapySubModeIndex);
+    // Change intensity without interrupting or restarting the therapy session.
+    therapyIntensityLevel++;
+    if (therapyIntensityLevel > 3) {
+      therapyIntensityLevel = 1;
+    }
     markSubModeChanged();
     bluetoothRequestBatteryStatusBlink();
 
-    DEBUG_PRINT("Therapy Sub-Mode changed: ");
-    DEBUG_PRINTLN(therapySubModes[therapySubModeIndex]);
+    DEBUG_PRINT("Therapy intensity changed: ");
+    DEBUG_PRINTLN(therapyIntensityLevel);
     break;
 
   case MODE_IDLE:
@@ -193,7 +194,7 @@ void buttonSetup() {
   // Set long press duration (matching HOLD_MS)
   btn.setPressMs(HOLD_MS);
 
-  therapySubModeIndex = storageLoadTherapySubMode();
+  therapySubModeIndex = 1;
 
   DEBUG_PRINTLN("Device ON");
   currentMode = MODE_IDLE;

@@ -4,6 +4,8 @@
 #include <RTTStream.h>
 #include "config.h"
 
+extern int therapyIntensityLevel;
+
 void bluetoothSetup();
 void bluetoothLoop();
 

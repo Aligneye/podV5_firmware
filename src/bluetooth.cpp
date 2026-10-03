@@ -320,13 +320,7 @@ static void currentSubModeText(char* out, size_t outSize) {
     }
 
     if (currentMode == MODE_THERAPY) {
-        unsigned long minutes = 10UL;
-        if (therapySubModeIndex == 1) {
-            minutes = 20UL;
-        } else if (therapySubModeIndex == 2) {
-            minutes = 30UL;
-        }
-        snprintf(out, outSize, "%lu MIN", minutes);
+        snprintf(out, outSize, "20 MIN");
         return;
     }
 
@@ -941,12 +935,11 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
         return false;
     }
 
-    uint8_t subModeIdx;
-    switch (durationMin) {
-        case 10: subModeIdx = 0; break;
-        case 20: subModeIdx = 1; break;
-        case 30: subModeIdx = 2; break;
-        default: error = "BAD_DURATION"; return false;
+    // Keep accepting the legacy duration choices so existing app versions can
+    // start therapy; the therapy engine always applies the fixed 20 minutes.
+    if (durationMin != 10 && durationMin != 20 && durationMin != 30) {
+        error = "BAD_DURATION";
+        return false;
     }
 
     if (intensity < 1 || intensity > 3) {
@@ -955,8 +948,7 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
     }
 
     therapyIntensityLevel = (int)intensity;
-    therapySubModeIndex = subModeIdx;
-    storageSaveTherapySubMode(therapySubModeIndex);
+    therapySubModeIndex = 1;
 
     deviceOn = true;
     setDeviceMode(MODE_THERAPY);
@@ -1683,14 +1675,9 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 bool hasIntensity = extractJsonIntField(payload, "therapy_intensity", intensity);
                 if (hasDuration && hasIntensity) {
                     if ((duration == 10 || duration == 20 || duration == 30) && (intensity >= 1 && intensity <= 3)) {
-                        if (duration == 10) {
-                            therapySubModeIndex = 0;
-                        } else if (duration == 20) {
-                            therapySubModeIndex = 1;
-                        } else if (duration == 30) {
-                            therapySubModeIndex = 2;
-                        }
-                        storageSaveTherapySubMode(therapySubModeIndex);
+                        // Duration is fixed in firmware; accept legacy app values
+                        // but always run a 20-minute session.
+                        therapySubModeIndex = 1;
                         therapyIntensityLevel = (int)intensity;
                         setDeviceMode(MODE_THERAPY);
                         therapyStart();
