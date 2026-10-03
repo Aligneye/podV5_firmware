@@ -19,7 +19,7 @@ static const char* PATTERN_NAMES[] = {
 
 static TherapyState therapyState = THERAPY_IDLE;
 static unsigned long therapyStartMs = 0;
-static unsigned long therapyDurationMs = THERAPY_DURATION_10_MIN;
+static unsigned long therapyDurationMs = THERAPY_DURATION_20_MIN;
 static unsigned long patternStartMs = 0;
 static unsigned long lastTickMs = 0;
 static bool patternsInitialized = false;
@@ -32,15 +32,10 @@ static int patternSequence[MAX_THERAPY_PATTERNS];
 static int totalPatterns = 0;
 int currentPatternIndex = 0;
 TrainingDelay currentTrainingDelay = TRAIN_INSTANT;
-unsigned long therapyDuration = THERAPY_DURATION_10_MIN;
+unsigned long therapyDuration = THERAPY_DURATION_20_MIN;
 
-static unsigned long durationForSubMode(uint8_t idx) {
-    switch (idx) {
-        case 0: return THERAPY_DURATION_10_MIN;
-        case 1: return THERAPY_DURATION_20_MIN;
-        case 2: return THERAPY_DURATION_30_MIN;
-        default: return THERAPY_DURATION_10_MIN;
-    }
+static unsigned long fixedTherapyDuration() {
+    return THERAPY_DURATION_20_MIN;
 }
 
 uint16_t getTherapyTotalPatternCount() {
@@ -275,7 +270,7 @@ void therapySetup() {
 
 void therapyEnsurePatternsInitialized() {
     if (!patternsInitialized) {
-        therapyDurationMs = durationForSubMode(therapySubModeIndex);
+        therapyDurationMs = fixedTherapyDuration();
         initializePatternSequence();
     }
 }
@@ -285,7 +280,7 @@ void therapyStart() {
     if (therapySessionId == 0) {
         therapySessionId = 1;
     }
-    therapyDurationMs = durationForSubMode(therapySubModeIndex);
+    therapyDurationMs = fixedTherapyDuration();
     therapyDuration = therapyDurationMs;
     therapyStartMs = millis();
     patternStartMs = therapyStartMs;
@@ -303,17 +298,17 @@ void therapyStart() {
     onTherapyStarted();
 }
 
-void therapyStop(bool returnToTraining) {
+void therapyStop(bool returnToIdle) {
     therapyState = THERAPY_IDLE;
     isTherapyRunning = false;
     patternsInitialized = false;
     motorSetDuty(0);
     motorUpdate();
-    if (returnToTraining) {
-        rtt.println("Therapy: session complete — switching to Training mode");
-        setDeviceMode(MODE_TRAINING);
-    }
     onTherapyEnded();
+    if (returnToIdle) {
+        rtt.println("Therapy: session complete — switching to Idle mode");
+        setDeviceMode(MODE_IDLE);
+    }
 }
 
 void therapyLoop() {
