@@ -39,8 +39,8 @@ static constexpr uint16_t kEarlyFinishQuality      = 85;
 static constexpr int      kStatsCheckEverySamples  = 5;
 
 // Short, smooth ramp-up/ramp-down pulses for calibration start and success.
-static constexpr uint16_t kCalibStartHapticMs   = 180U;
-static constexpr uint16_t kCalibSuccessHapticMs = 180U;
+static constexpr uint16_t kCalibStartHapticMs   = 150U;
+static constexpr uint16_t kCalibSuccessHapticMs = 150U;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
