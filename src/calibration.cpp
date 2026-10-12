@@ -38,10 +38,9 @@ static constexpr int      kEarlyFinishMinSamples   = 75;
 static constexpr uint16_t kEarlyFinishQuality      = 85;
 static constexpr int      kStatsCheckEverySamples  = 5;
 
-// Calm result haptics: smooth ramp-up/ramp-down "breathing" pulse rather than a hard buzz.
-// Fail rings noticeably longer than success so the two are distinguishable by feel alone.
-static constexpr uint16_t kCalibSuccessHapticMs    = 350U;
-static constexpr uint16_t kCalibFailHapticMs       = 750U;
+// Short, smooth ramp-up/ramp-down pulses for calibration start and success.
+static constexpr uint16_t kCalibStartHapticMs   = 180U;
+static constexpr uint16_t kCalibSuccessHapticMs = 180U;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
@@ -61,7 +60,6 @@ static float         samplesZ[kMaxCalibrationSamples];
 static char          lastCalibrationResult[16] = "";
 static unsigned long calibResultSetAt    = 0;
 
-static unsigned long s_failVibEndMs      = 0;
 static unsigned long s_successPulseEndMs = 0;
 // Temporary buffer for successful calibration before profile naming
 static float s_lastCalibratedX = 0.0f;
@@ -140,11 +138,6 @@ static void calibrationFail(const char* reason) {
     notifyCalibrationComplete(false, 0u, "", 0u, (uint16_t)totalSamples, reason);
     goToIdleMode();
 
-    // Calm, longer ring on failure — smooth ramp up/down, no hard buzz.
-    // Started after the mode transition so setDeviceMode()'s motorCancelFeedback() can't wipe it.
-    s_failVibEndMs = millis() + kCalibFailHapticMs;
-    motorStartCalmHaptic(kCalibFailHapticMs);
-
 }
 
 static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t passedSamples,
@@ -171,9 +164,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "LOW_QUALITY");
         goToIdleMode();
-
-        s_failVibEndMs = millis() + kCalibFailHapticMs;
-        motorStartCalmHaptic(kCalibFailHapticMs);
 
         return;
     }
@@ -202,9 +192,6 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "PROFILE_SAVE_FAILED");
         goToIdleMode();
-
-        s_failVibEndMs = millis() + kCalibFailHapticMs;
-        motorStartCalmHaptic(kCalibFailHapticMs);
 
         return;
     }
@@ -387,7 +374,6 @@ void initCalibration() {
     pendingStart = false;
     pendingCancel = false;
     motorSetDuty(0);
-    s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastSampleTime    = 0;
     s_lastBleProgressMs = 0;
@@ -573,8 +559,8 @@ void startCalibration() {
     deviceOn = true;
     wakePostureSensor();
 
-    // Start calibration with start haptic pulse (150 duty for 150ms)
-    motorOverrideDuty(150, 150);
+    // Short, smooth start pulse.
+    motorStartCalmHaptic(kCalibStartHapticMs);
 
     calibState         = CALIB_STATE_GET_READY;
     isCalibrationRunning  = true;
@@ -600,7 +586,6 @@ void cancelCalibration() {
     notifyCalibrationStatus("cancelled", "done");
     motorSetDuty(0);
     motorUpdate();
-    s_failVibEndMs      = 0;
     s_successPulseEndMs = 0;
     s_lastCalibrationValid = false;
 
@@ -688,9 +673,6 @@ bool calibrationMotorActive() {
         return true;
     }
     const unsigned long now = millis();
-    if (s_failVibEndMs != 0u && (int32_t)(now - s_failVibEndMs) < 0) {
-        return true;
-    }
     if (s_successPulseEndMs != 0u && (int32_t)(now - s_successPulseEndMs) < 0) {
         return true;
     }
