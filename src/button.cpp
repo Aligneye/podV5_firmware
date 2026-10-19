@@ -5,6 +5,7 @@
 #include "storage.h"
 #include "therapy.h"
 #include "device_time.h"
+#include "sleep.h"
 #include "training.h"
 #include <OneButton.h>
 #include "rtt_debugger.h"
@@ -163,7 +164,7 @@ static void handleMultiClick() {
     return;
   }
 
-  bluetoothUnlockForPairing();
+  enterSleepMode();
 }
 
 static void handleHold() {

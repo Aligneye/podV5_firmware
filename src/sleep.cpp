@@ -50,9 +50,10 @@ static bool sleepTimerEligible() {
            !isCalibrating();
 }
 
-static void enterSleepMode() {
+static void enterSleepModeInternal(bool requireDisconnected) {
     // State may have changed after the timeout check earlier in this loop.
-    if (s_sleeping || !sleepTimerEligible()) {
+    if (s_sleeping || currentMode != MODE_IDLE || isCalibrating() ||
+        (requireDisconnected && bluetoothIsConnected())) {
         return;
     }
 
@@ -88,6 +89,10 @@ static void enterSleepMode() {
     }
 }
 
+void enterSleepMode() {
+    enterSleepModeInternal(false);
+}
+
 void sleepTimerSetup() {
     s_timerStartedMs = 0;
     s_timerRunning = false;
@@ -111,6 +116,6 @@ void sleepTimerLoop() {
     }
 
     if (!s_sleeping && (now - s_timerStartedMs) >= kIdleDisconnectedSleepTimeoutMs) {
-        enterSleepMode();
+        enterSleepModeInternal(true);
     }
 }

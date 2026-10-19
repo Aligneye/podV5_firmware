@@ -4,3 +4,4 @@
 
 void sleepTimerSetup();
 void sleepTimerLoop();
+void enterSleepMode();

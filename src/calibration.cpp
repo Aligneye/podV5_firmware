@@ -38,9 +38,10 @@ static constexpr int      kEarlyFinishMinSamples   = 75;
 static constexpr uint16_t kEarlyFinishQuality      = 85;
 static constexpr int      kStatsCheckEverySamples  = 5;
 
-// Short, smooth ramp-up/ramp-down pulses for calibration start and success.
+// Smooth ramp-up/ramp-down pulses for calibration status feedback.
 static constexpr uint16_t kCalibStartHapticMs   = 150U;
 static constexpr uint16_t kCalibSuccessHapticMs = 150U;
+static constexpr uint16_t kCalibFailureHapticMs = 750U;
 
 static volatile bool pendingStart  = false;
 static volatile bool pendingCancel = false;
@@ -60,7 +61,7 @@ static float         samplesZ[kMaxCalibrationSamples];
 static char          lastCalibrationResult[16] = "";
 static unsigned long calibResultSetAt    = 0;
 
-static unsigned long s_successPulseEndMs = 0;
+static unsigned long s_resultPulseEndMs = 0;
 // Temporary buffer for successful calibration before profile naming
 static float s_lastCalibratedX = 0.0f;
 static float s_lastCalibratedY = 0.0f;
@@ -80,6 +81,11 @@ struct CalibrationStats {
 };
 
 static CalibrationStats calculateCalibrationStats(int sampleLimit);
+
+static void startCalibrationFailureHaptic() {
+    s_resultPulseEndMs = millis() + kCalibFailureHapticMs;
+    motorStartCalmHaptic(kCalibFailureHapticMs);
+}
 
 static uint16_t computeCalibrationQuality(uint32_t sampleCount, const CalibrationStats& stats) {
     float spread = (stats.stdDevX + stats.stdDevY + stats.stdDevZ) / 3.0f;
@@ -102,6 +108,7 @@ static const char* calibrationQualityLabel(uint16_t quality) {
 static void calibrationStartBlocked(const char* reason) {
     logPacket("CALIB", reason ? reason : "START_BLOCKED");
     notifyCalibrationComplete(false, 0u, "", 0u, 0u, reason ? reason : "START_BLOCKED");
+    startCalibrationFailureHaptic();
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -137,6 +144,7 @@ static void calibrationFail(const char* reason) {
     notifyCalibrationStatus("failed", "done");
     notifyCalibrationComplete(false, 0u, "", 0u, (uint16_t)totalSamples, reason);
     goToIdleMode();
+    startCalibrationFailureHaptic();
 
 }
 
@@ -164,6 +172,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "LOW_QUALITY");
         goToIdleMode();
+        startCalibrationFailureHaptic();
 
         return;
     }
@@ -192,6 +201,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "PROFILE_SAVE_FAILED");
         goToIdleMode();
+        startCalibrationFailureHaptic();
 
         return;
     }
@@ -240,7 +250,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
 
     // Calm, brief ring on success — smooth ramp up/down, no hard buzz.
     // Started after the mode transition so setDeviceMode()'s motorCancelFeedback() can't wipe it.
-    s_successPulseEndMs = millis() + kCalibSuccessHapticMs;
+    s_resultPulseEndMs = millis() + kCalibSuccessHapticMs;
     motorStartCalmHaptic(kCalibSuccessHapticMs);
 
 }
@@ -374,7 +384,7 @@ void initCalibration() {
     pendingStart = false;
     pendingCancel = false;
     motorSetDuty(0);
-    s_successPulseEndMs = 0;
+    s_resultPulseEndMs = 0;
     s_lastSampleTime    = 0;
     s_lastBleProgressMs = 0;
     s_lastCalibrationValid = false;
@@ -586,7 +596,7 @@ void cancelCalibration() {
     notifyCalibrationStatus("cancelled", "done");
     motorSetDuty(0);
     motorUpdate();
-    s_successPulseEndMs = 0;
+    s_resultPulseEndMs = 0;
     s_lastCalibrationValid = false;
 
     deviceOn = true;
@@ -673,7 +683,7 @@ bool calibrationMotorActive() {
         return true;
     }
     const unsigned long now = millis();
-    if (s_successPulseEndMs != 0u && (int32_t)(now - s_successPulseEndMs) < 0) {
+    if (s_resultPulseEndMs != 0u && (int32_t)(now - s_resultPulseEndMs) < 0) {
         return true;
     }
     return false;
