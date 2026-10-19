@@ -68,7 +68,7 @@
 #define BLE_PREFERRED_SUPERVISION_TIMEOUT_MS 5000UL
 #endif
 #ifndef BLE_CONNECTION_HAPTIC_ENABLED
-#define BLE_CONNECTION_HAPTIC_ENABLED      0
+#define BLE_CONNECTION_HAPTIC_ENABLED      1
 #endif
 
 // ── Session sync over BLE ──────────────────────────────────

@@ -5,6 +5,7 @@
 #include "storage.h"
 #include "therapy.h"
 #include "device_time.h"
+#include "sleep.h"
 #include "training.h"
 #include <OneButton.h>
 #include "rtt_debugger.h"
@@ -114,11 +115,8 @@ static void handleDoubleClick() {
 
   switch (currentMode) {
   case MODE_TRAINING:
-    trainingSubModeIndex = static_cast<TrainingAlertStyle>((static_cast<uint8_t>(trainingSubModeIndex) + 1) % TRAINING_SUBMODE_COUNT);
-    markSubModeChanged();
-    bluetoothRequestBatteryStatusBlink();
-    DEBUG_PRINT("Training Sub-Mode: ");
-    DEBUG_PRINTLN(trainingSubModes[static_cast<uint8_t>(trainingSubModeIndex)]);
+    DEBUG_PRINTLN("Entering calibration from TRAINING mode");
+    calibrationRequestStart();
     break;
 
   case MODE_THERAPY:
@@ -135,8 +133,7 @@ static void handleDoubleClick() {
     break;
 
   case MODE_IDLE:
-    DEBUG_PRINTLN("Entering calibration from IDLE mode");
-    calibrationRequestStart();
+    // Reserved for future BLE pairing unlock.
     break;
 
   default:
@@ -163,7 +160,7 @@ static void handleMultiClick() {
     return;
   }
 
-  bluetoothUnlockForPairing();
+  enterSleepMode();
 }
 
 static void handleHold() {

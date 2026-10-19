@@ -33,7 +33,6 @@ static bool blePairingKnownPaired = false;
 static bool clearBondsAfterDisconnect = false;
 static bool connectionHapticPending = false;
 static bool connectionHapticPlayed = false;
-static bool disconnectionHapticPending = false;
 static bool sleepShutdownRequested = false;
 static bool forceTelemetrySync = false;
 static bool forceLiveSync = false;
@@ -121,8 +120,7 @@ static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
 static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
-static constexpr uint8_t DISCONNECTION_HAPTIC_DUTY = 150;
-static constexpr uint16_t DISCONNECTION_HAPTIC_MS = 250;
+static constexpr uint16_t CONNECTION_HAPTIC_MS = 150U;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
 
 static void updateBatteryReading(unsigned long now);
@@ -715,7 +713,6 @@ static void onBleConnect(uint16_t conn_handle) {
     connected = true;
     connectionHapticPending = BLE_CONNECTION_HAPTIC_ENABLED != 0;
     connectionHapticPlayed = false;
-    disconnectionHapticPending = false;
     forceTelemetrySync = true;
     forceLiveSync = true;
     lastLiveSendMs = 0;
@@ -766,7 +763,6 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     syncReset();
     connectionHapticPending = false;
     connectionHapticPlayed = false;
-    disconnectionHapticPending = true;
     forceLiveSync = false;
     connectedSinceMs = 0UL;
     rtt.print("[BLE EVT] disconnected reason=0x");
@@ -1956,19 +1952,14 @@ void bluetoothLoop() {
     }
 
     if (connected && connectionHapticPending && !connectionHapticPlayed &&
+        !calibrationMotorActive() &&
         connectedSinceMs != 0UL &&
         (now - connectedSinceMs) >= CONNECTION_HAPTIC_DELAY_MS) {
         connectionHapticPending = false;
         connectionHapticPlayed = true;
         motorCancelFeedback();
         motorSetDuty(0);
-        motorOverrideDuty(150, 125);
-    }
-    if (disconnectionHapticPending && !calibrationMotorActive()) {
-        disconnectionHapticPending = false;
-        motorCancelFeedback();
-        motorSetDuty(0);
-        motorOverrideDuty(DISCONNECTION_HAPTIC_DUTY, DISCONNECTION_HAPTIC_MS);
+        motorStartCalmHaptic(CONNECTION_HAPTIC_MS);
     }
 
     if (!updatePairingLed(now)) {
@@ -2210,7 +2201,6 @@ void bluetoothUnlockForPairing() {
     clearBondsAfterDisconnect = false;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
-    disconnectionHapticPending = false;
     connectedSinceMs = 0UL;
     bleLinkSettleActive = false;
     saveBlePairMarker(false);
