@@ -133,8 +133,7 @@ static void handleDoubleClick() {
     break;
 
   case MODE_IDLE:
-    DEBUG_PRINTLN("Entering calibration from IDLE mode");
-    calibrationRequestStart();
+    // Reserved for future BLE pairing unlock.
     break;
 
   default:
