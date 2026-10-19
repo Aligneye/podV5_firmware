@@ -104,9 +104,9 @@ Lines 89-112
 : 
 
 handleDoubleClick()
-Double click karne par sub-modes cycle hote hain:
-Training Mode mein: Sub-modes index shift hote hain (Instant -> Delayed -> No alerts).
-Therapy Mode mein: Sub-mode index rotate hota hai (durations toggle hoti hain: 10, 20 ya 30 mins). New selection ko EEPROM/Flash storage mein write (storageSaveTherapySubMode()) kiya jata hai taaki next boot par bhi yaad rahe, aur therapy restart ho jaati hai.
+Double click ka behavior current mode par depend karta hai:
+Training ya Idle Mode mein: Calibration start hoti hai. Training alert style change nahi hota.
+Therapy Mode mein: Intensity level 1 -> 2 -> 3 cycle hota hai bina therapy session restart kiye.
 
 
 Lines 114-125

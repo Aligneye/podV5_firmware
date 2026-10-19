@@ -30,7 +30,7 @@ Flashing uses a custom script (`upload_hooks.py`) that invokes OpenOCD with CMSI
 7. `maintainDeviceTime()` — auto-persist RTC epoch to flash every 30s
 8. `updateSessionStats()` + `maintainSessionStats()` — session event tracking and promotion
 
-**Mode state machine** (managed in `button.cpp`): the device boots in `IDLE`; a single click toggles `IDLE ↔ TRAINING`, a hold enters `THERAPY`, and a single click or completed session returns `THERAPY → IDLE`. Triple-click in IDLE unlocks BLE pairing.
+**Mode state machine** (managed in `button.cpp`): the device boots in `IDLE`; a single click toggles `IDLE ↔ TRAINING`, a hold enters `THERAPY`, and a single click or completed session returns `THERAPY → IDLE`. Double-click starts calibration from `IDLE` or `TRAINING`; triple-click in `IDLE` enters sleep.
 
 **Posture detection** (`src/training.cpp`): LIS3DH accelerometer sampled at 100 Hz over I2C, low-pass filtered (α=0.1), then angle computed via dot product against the stored calibration reference vector. Bad posture triggers motor feedback.
 
