@@ -1,5 +1,34 @@
 # Secure BLE Pairing Lock Plan
 
+## Implementation status (October 19, 2026)
+
+This plan is now implemented in the firmware with the following concrete
+choices:
+
+- An Idle-mode double click revokes the current owner and opens a 120-second
+  pairing window.
+- An unowned pod is non-connectable until that physical action opens the
+  window.
+- A successful encrypted bond is committed to `/ble_owner.dat` as a versioned,
+  CRC-protected owner record tied to Bluefruit's stored bond.
+- Locked advertising uses the nRF52 SoftDevice device-identity list and
+  connection-request whitelist. This lets the owner's IRK resolve rotating
+  private addresses while other phones are rejected by the controller.
+- This installed Bluefruit release automatically accepts security-parameter
+  requests before the raw application callback runs. The firmware therefore
+  disconnects any locked-state pairing request immediately and never opens the
+  application authorization gate. This also means an owner that deletes the
+  phone-side bond must use the physical unlock flow before pairing again.
+- Characteristic RX, notifications, telemetry, session sync, DFU commands,
+  and factory-reset commands are inaccessible until the stored owner has
+  restored an encrypted link.
+- Unlock is power-loss-safe: a revocation-pending owner record is written
+  before disconnect, then the bond and owner record are removed from the main
+  loop before open advertising begins.
+
+The custom SoftDevice advertising setup is local to `bluetooth.cpp`; no files
+inside `.platformio/packages` were patched.
+
 ## Objective
 
 Implement a single-owner BLE bond lock for the pod:
@@ -460,13 +489,12 @@ The app must not have a remote unlock command if physical access is intended to 
 4. If authenticated pairing is enabled, collect the per-pod PIN or QR secret.
 5. Wait for bonding and encryption to complete.
 6. Enable notifications.
-7. Wait for explicit firmware confirmation, for example:
-
-```json
-{"t":"PAIRING","state":"OWNER_COMMITTED"}
-```
-
-8. Save the pod identity in app storage.
+7. Wait for the first normal pod notification before sending commands. The
+   current firmware opens its application gate only after the owner record is
+   durable; it does not yet define a dedicated `OWNER_COMMITTED` packet.
+8. Save the pod identity in app storage. This is only for app UX and discovery;
+   the phone OS's BLE bond keys, not this saved app value, prove ownership to
+   the pod.
 
 ### Stale phone bond
 

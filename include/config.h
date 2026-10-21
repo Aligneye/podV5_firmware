@@ -55,6 +55,13 @@
 #define BLE_CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define BLE_DEVICE_NAME         "align pod"
 
+// Manufacturer Specific Data begins with a Bluetooth SIG company identifier.
+// 0xFFFF is suitable for development; replace it with Aligneye's assigned
+// identifier before production if one is available.
+#ifndef BLE_COMPANY_IDENTIFIER
+#define BLE_COMPANY_IDENTIFIER 0xFFFFu
+#endif
+
 // Connection-setup compatibility test profile.
 // Keep optional local DLE/PHY procedures out of the initial connection.
 // The phone may still initiate either procedure, which the SoftDevice handles.
@@ -69,6 +76,18 @@
 #endif
 #ifndef BLE_CONNECTION_HAPTIC_ENABLED
 #define BLE_CONNECTION_HAPTIC_ENABLED      1
+#endif
+
+// Pairing is deliberately time-bounded.  Outside this window an unowned pod
+// stays non-connectable, and an owned pod accepts only its stored BLE owner.
+#ifndef BLE_PAIRING_WINDOW_MS
+#define BLE_PAIRING_WINDOW_MS               120000UL
+#endif
+#ifndef BLE_SECURITY_TIMEOUT_MS
+#define BLE_SECURITY_TIMEOUT_MS             10000UL
+#endif
+#ifndef BLE_OWNER_CLAIM_TIMEOUT_MS
+#define BLE_OWNER_CLAIM_TIMEOUT_MS          5000UL
 #endif
 
 // ── Session sync over BLE ──────────────────────────────────

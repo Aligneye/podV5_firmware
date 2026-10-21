@@ -133,7 +133,10 @@ static void handleDoubleClick() {
     break;
 
   case MODE_IDLE:
-    // Reserved for future BLE pairing unlock.
+    // Ownership changes require physical access.  Bluetooth owns the actual
+    // revoke/open-window state machine; the button layer only requests it.
+    DEBUG_PRINTLN("Opening BLE pairing window from IDLE mode");
+    bluetoothUnlockForPairing();
     break;
 
   default:

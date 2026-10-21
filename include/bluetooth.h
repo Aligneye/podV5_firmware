@@ -13,6 +13,8 @@ void bluetoothStartAdvertising();
 void bluetoothStopAdvertising();
 void bluetoothPrepareForSleep();
 bool bluetoothIsConnected();
+bool bluetoothIsAuthorized();
+bool bluetoothPairingWindowIsOpen();
 void bluetoothUnlockForPairing();
 
 /** Safe from BLE RX callback: only sets a deferred flag (see calibration). */

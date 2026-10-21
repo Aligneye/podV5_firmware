@@ -11,9 +11,11 @@
 #include "BatteryMonitor.h"
 #include "version.h"
 #include "rtt_debugger.h"
+#include <cstddef>
 #include <cstring>
 #include <bluefruit.h>
 #include <ble_hci.h>
+#include <utility/bonding.h>
 #if __has_include(<InternalFileSystem.h>)
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
@@ -28,9 +30,7 @@ int therapyIntensityLevel = 2; // Default to Mid (2)
 static bool connected = false;
 static bool bleInitialized = false;
 static uint16_t currentConnHandle = BLE_CONN_HANDLE_INVALID;
-static bool pairingUnlockActive = true;
-static bool blePairingKnownPaired = false;
-static bool clearBondsAfterDisconnect = false;
+static volatile bool applicationAuthorized = false;
 static bool connectionHapticPending = false;
 static bool connectionHapticPlayed = false;
 static bool sleepShutdownRequested = false;
@@ -121,12 +121,96 @@ static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
 static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
 static constexpr uint16_t CONNECTION_HAPTIC_MS = 150U;
-static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat";
+static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat"; // Removed during migration.
+
+// -------------------------------------------------------------------------
+// Single-owner pairing lock
+// -------------------------------------------------------------------------
+//
+// A BLE connection is not an authorization decision.  The pod authorizes the
+// app only after the connecting peer matches the stored owner identity and the
+// SoftDevice reports an encrypted link.  New bonds are accepted only during a
+// short window opened by the physical button.
+enum class PairingLockState : uint8_t {
+    NoOwnerClosed,
+    PairingOpen,
+    ClaimCommitting,
+    OwnerLocked,
+    OwnerSecuring,
+    OwnerAuthorized,
+    Revoking
+};
+
+static volatile PairingLockState pairingLockState = PairingLockState::NoOwnerClosed;
+
+static constexpr uint32_t BLE_OWNER_MAGIC = 0x424F574EUL; // "BOWN"
+static constexpr uint16_t BLE_OWNER_VERSION = 1u;
+static constexpr uint16_t BLE_OWNER_VALID = 0x0001u;
+static constexpr uint16_t BLE_OWNER_REVOCATION_PENDING = 0x0002u;
+static constexpr uint8_t BLE_ADV_STATUS_VERSION = 1u;
+static constexpr uint8_t BLE_ADV_STATUS_OWNER_BONDED = 0x01u;
+static constexpr uint8_t BLE_ADV_STATUS_PAIRING_OPEN = 0x02u;
+static const char* BLE_OWNER_PATH = "/ble_owner.dat";
+static const char* BLE_OWNER_TMP_PATH = "/ble_owner.tmp";
+
+// Store only a stable reference to Bluefruit's bond.  The LTK and IRK remain
+// in Bluefruit's bond file; duplicating encryption keys creates two sources of
+// truth that can drift apart after a reset.
+struct BleOwnerRecord {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t flags;
+    uint8_t addressType;
+    uint8_t address[BLE_GAP_ADDR_LEN];
+    uint8_t reserved;
+    uint32_t bondFingerprint;
+    uint32_t crc;
+};
+
+static BleOwnerRecord ownerRecord = {};
+static bond_keys_t ownerBond = {};
+static bool ownerRecordValid = false;
+static bool connectedPeerMatchesOwner = false;
+static bool linkSecured = false;
+static unsigned long pairingWindowStartedMs = 0;
+static unsigned long securityDeadlineStartedMs = 0;
+static unsigned long claimStartedMs = 0;
+static unsigned long lastClaimLoadAttemptMs = 0;
+
+// BLE callbacks run on Bluefruit's callback task.  They only copy compact
+// event state here; filesystem work and advertising transitions are deferred
+// to bluetoothLoop(), which runs on the main firmware task.
+static volatile bool pendingAdvertisingRestart = false;
+static volatile bool pendingUnlockFinalize = false;
+static volatile bool pendingUnauthorizedDisconnect = false;
+static volatile bool pendingSecuredEvent = false;
+static volatile uint16_t pendingSecuredHandle = BLE_CONN_HANDLE_INVALID;
+static volatile bool pendingAuthEvent = false;
+static volatile uint8_t pendingAuthStatus = BLE_GAP_SEC_STATUS_UNSPECIFIED;
+static volatile bool pendingAuthBonded = false;
+static ble_gap_addr_t pendingClaimIdentity = {};
+static bool claimAuthSucceeded = false;
+static bool claimLinkSecured = false;
+static bool preservePairingWindowOnCleanup = false;
+
+// We use a small SoftDevice advertiser instead of Bluefruit.Advertising.start()
+// because this version of Bluefruit hardcodes BLE_GAP_ADV_FP_ANY.  Owning the
+// advertising parameters here lets locked mode use the controller whitelist
+// without patching an installed PlatformIO package.
+static uint8_t pairingAdvHandle = BLE_GAP_ADV_SET_HANDLE_NOT_SET;
+static bool pairingAdvertisingRunning = false;
+static ble_gap_adv_data_t pairingAdvData = {};
+
+static void startAdvertising();
+static void stopPairingAdvertising();
+static void processPairingLock(unsigned long now);
 
 static void updateBatteryReading(unsigned long now);
 
 static bool bleApplicationTxAllowed(unsigned long now) {
-    if (!connected) return false;
+    // Encryption alone is insufficient: during an open pairing window a
+    // non-owner can be connected while the bond is still being evaluated.
+    if (!connected || !applicationAuthorized) return false;
     if (!bleLinkSettleActive) return true;
     if ((uint32_t)(now - bleLinkSettleStartMs) < BLE_LINK_SETTLE_MS) {
         return false;
@@ -482,6 +566,14 @@ static void onBleRawEvent(ble_evt_t* evt) {
 
         case BLE_GAP_EVT_SEC_PARAMS_REQUEST:
             rtt.printf("[BLEL] %lu SEC_REQ h=%u\n", now, handle);
+            // Bluefruit's internal handler accepts this request before the
+            // application event hook runs.  In locked states we therefore
+            // fail closed by scheduling an immediate disconnect.  In normal
+            // operation the controller whitelist prevents this path entirely.
+            if (pairingLockState != PairingLockState::PairingOpen &&
+                pairingLockState != PairingLockState::ClaimCommitting) {
+                pendingUnauthorizedDisconnect = true;
+            }
             break;
 
         case BLE_GAP_EVT_SEC_INFO_REQUEST:
@@ -494,6 +586,17 @@ static void onBleRawEvent(ble_evt_t* evt) {
             rtt.printf("[BLEL] %lu AUTH h=%u st=0x%02X bond=%u lesc=%u src=%u\n",
                        now, handle, s.auth_status, s.bonded, s.lesc,
                        s.error_src);
+            pendingAuthStatus = s.auth_status;
+            pendingAuthBonded = s.bonded != 0;
+            pendingAuthEvent = true;
+
+            // Keep the address used for this connection.  bond_load_keys()
+            // resolves an RPA with the newly stored IRK, so this works for
+            // both private-address phones and public/static-address phones.
+            BLEConnection* conn = Bluefruit.Connection(handle);
+            if (conn) {
+                pendingClaimIdentity = conn->getPeerAddr();
+            }
             break;
         }
 
@@ -503,6 +606,10 @@ static void onBleRawEvent(ble_evt_t* evt) {
             rtt.printf("[BLEL] %lu SEC_OK h=%u sm=%u lv=%u key=%u\n",
                        now, handle, s.sec_mode.sm, s.sec_mode.lv,
                        s.encr_key_size);
+            if (s.sec_mode.sm != 0 && s.sec_mode.lv != 0) {
+                pendingSecuredHandle = handle;
+                pendingSecuredEvent = true;
+            }
             break;
         }
 
@@ -594,37 +701,125 @@ static void turnRgbLedOff() {
     setRgbLedPwm(0, 0, 0);
 }
 
-static bool loadBlePairMarker() {
+static uint32_t pairingCrc32(const uint8_t* data, size_t length) {
+    uint32_t crc = 0xFFFFFFFFUL;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (uint8_t bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ ((crc & 1u) ? 0xEDB88320UL : 0UL);
+        }
+    }
+    return ~crc;
+}
+
+static uint32_t bondFingerprint(const bond_keys_t& bond) {
+    // This value detects owner-record/bond-store mismatches.  It is not used
+    // as an authentication secret; the LTK itself remains in Bluefruit's bond
+    // store and is proven by the BLE encryption procedure.
+    return pairingCrc32(reinterpret_cast<const uint8_t*>(&bond), sizeof(bond));
+}
+
+static ble_gap_addr_t ownerIdentityAddress(const BleOwnerRecord& record) {
+    ble_gap_addr_t address = {};
+    address.addr_type = record.addressType;
+    memcpy(address.addr, record.address, BLE_GAP_ADDR_LEN);
+    return address;
+}
+
+static void fillOwnerRecord(BleOwnerRecord& record,
+                            const ble_gap_addr_t& identity,
+                            const bond_keys_t& bond,
+                            uint16_t flags) {
+    memset(&record, 0, sizeof(record));
+    record.magic = BLE_OWNER_MAGIC;
+    record.version = BLE_OWNER_VERSION;
+    record.flags = flags;
+    record.addressType = identity.addr_type;
+    memcpy(record.address, identity.addr, BLE_GAP_ADDR_LEN);
+    record.bondFingerprint = bondFingerprint(bond);
+    record.crc = pairingCrc32(
+        reinterpret_cast<const uint8_t*>(&record), offsetof(BleOwnerRecord, crc));
+}
+
+static bool ownerRecordIsStructurallyValid(const BleOwnerRecord& record) {
+    if (record.magic != BLE_OWNER_MAGIC ||
+        record.version != BLE_OWNER_VERSION ||
+        (record.flags & BLE_OWNER_VALID) == 0u) {
+        return false;
+    }
+
+    const uint32_t expected = pairingCrc32(
+        reinterpret_cast<const uint8_t*>(&record), offsetof(BleOwnerRecord, crc));
+    return expected == record.crc;
+}
+
+static bool loadOwnerRecord(BleOwnerRecord& record) {
 #if BLE_PAIR_STORE_HAS_FS
     InternalFS.begin();
-    File file = InternalFS.open(BLE_PAIR_MARKER_PATH, FILE_O_READ);
+    File file = InternalFS.open(BLE_OWNER_PATH, FILE_O_READ);
     if (!file) return false;
-
-    uint8_t marker = 0;
-    int readBytes = file.read(&marker, sizeof(marker));
+    const int count = file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record));
     file.close();
-    return readBytes == (int)sizeof(marker) && marker == 1u;
+    return count == (int)sizeof(record) && ownerRecordIsStructurallyValid(record);
 #else
+    (void)record;
     return false;
 #endif
 }
 
-static void saveBlePairMarker(bool paired) {
+static bool saveOwnerRecord(const BleOwnerRecord& requested) {
 #if BLE_PAIR_STORE_HAS_FS
+    BleOwnerRecord record = requested;
+    record.crc = pairingCrc32(
+        reinterpret_cast<const uint8_t*>(&record), offsetof(BleOwnerRecord, crc));
+
     InternalFS.begin();
-    InternalFS.remove(BLE_PAIR_MARKER_PATH);
-    if (!paired) return;
+    InternalFS.remove(BLE_OWNER_TMP_PATH);
+    File file = InternalFS.open(BLE_OWNER_TMP_PATH, FILE_O_WRITE);
+    if (!file) return false;
 
-    File file = InternalFS.open(BLE_PAIR_MARKER_PATH, FILE_O_WRITE);
-    if (!file) return;
-
-    uint8_t marker = 1u;
-    file.write(&marker, sizeof(marker));
+    file.seek(0);
+    const size_t written = file.write(
+        reinterpret_cast<const uint8_t*>(&record), sizeof(record));
+    file.truncate(sizeof(record));
     file.flush();
     file.close();
+    if (written != sizeof(record)) {
+        InternalFS.remove(BLE_OWNER_TMP_PATH);
+        return false;
+    }
+
+    // LittleFS rename is atomic.  A reset leaves either the old complete
+    // record or the new complete record, never a partially written owner.
+    if (!InternalFS.rename(BLE_OWNER_TMP_PATH, BLE_OWNER_PATH)) {
+        InternalFS.remove(BLE_OWNER_TMP_PATH);
+        return false;
+    }
+    return true;
 #else
-    (void)paired;
+    (void)requested;
+    return false;
 #endif
+}
+
+static void clearOwnerRecordFiles() {
+#if BLE_PAIR_STORE_HAS_FS
+    InternalFS.begin();
+    InternalFS.remove(BLE_OWNER_TMP_PATH);
+    InternalFS.remove(BLE_OWNER_PATH);
+    // Delete the obsolete one-byte marker so an older firmware's UI state
+    // cannot be mistaken for the new owner record after migration.
+    InternalFS.remove(BLE_PAIR_MARKER_PATH);
+#endif
+}
+
+static bool loadAndVerifyOwnerBond(const BleOwnerRecord& record,
+                                   bond_keys_t& bond) {
+    ble_gap_addr_t identity = ownerIdentityAddress(record);
+    if (!bond_load_keys(BLE_GAP_ROLE_PERIPH, &identity, &bond)) {
+        return false;
+    }
+    return record.bondFingerprint == bondFingerprint(bond);
 }
 
 static void updateBatteryLed(uint8_t percentage, uint8_t brightness = 255) {
@@ -687,76 +882,241 @@ static void updateBatteryStatusBlink(unsigned long now) {
 }
 
 static bool updatePairingLed(unsigned long now) {
-    (void)now;
-    return false;
+    if (pairingLockState != PairingLockState::PairingOpen &&
+        pairingLockState != PairingLockState::ClaimCommitting) {
+        return false;
+    }
+
+    // A fast red blink makes the physically opened enrollment window visible
+    // to the user.  It stops as soon as the new owner is safely committed.
+    const bool on = ((now / UNPAIRED_RED_BLINK_PERIOD_MS) & 1u) == 0u;
+    if (on) {
+        setRgbLedPwm(255, 0, 0);
+    } else {
+        turnRgbLedOff();
+    }
+    return true;
+}
+
+static bool addressesEqual(const ble_gap_addr_t& left,
+                           const ble_gap_addr_t& right) {
+    return left.addr_type == right.addr_type &&
+           memcmp(left.addr, right.addr, BLE_GAP_ADDR_LEN) == 0;
+}
+
+static bool peerMatchesStoredOwner(const ble_gap_addr_t& peer) {
+    if (!ownerRecordValid) return false;
+
+    const ble_gap_addr_t identity = ownerIdentityAddress(ownerRecord);
+    if (addressesEqual(peer, identity)) return true;
+
+    // Modern phones normally connect with a rotating Resolvable Private
+    // Address (RPA).  The owner's IRK proves that such an address belongs to
+    // the same bonded phone without the app sending a reusable owner token.
+    return peer.addr_type == BLE_GAP_ADDR_TYPE_RANDOM_PRIVATE_RESOLVABLE &&
+           Bluefruit.Security.resolveAddress(&peer, &ownerBond.peer_id.id_info);
+}
+
+static void stopPairingAdvertising() {
+    if (pairingAdvHandle != BLE_GAP_ADV_SET_HANDLE_NOT_SET) {
+        const uint32_t result = sd_ble_gap_adv_stop(pairingAdvHandle);
+        if (result != NRF_SUCCESS && result != NRF_ERROR_INVALID_STATE) {
+            rtt.printf("[BLE LOCK] advertising stop failed err=%lu\n",
+                       (unsigned long)result);
+        }
+    }
+    pairingAdvertisingRunning = false;
+}
+
+static bool clearControllerPeerFilters() {
+    const uint32_t whitelistResult = sd_ble_gap_whitelist_set(nullptr, 0);
+    const uint32_t identityResult =
+        sd_ble_gap_device_identities_set(nullptr, nullptr, 0);
+    if (whitelistResult != NRF_SUCCESS || identityResult != NRF_SUCCESS) {
+        rtt.printf("[BLE LOCK] clear filters wl=%lu ids=%lu\n",
+                   (unsigned long)whitelistResult,
+                   (unsigned long)identityResult);
+        return false;
+    }
+    return true;
+}
+
+static bool installOwnerPeerFilters() {
+    if (!ownerRecordValid) return false;
+
+    // The identity list lets the SoftDevice resolve the owner's rotating RPA;
+    // the whitelist then rejects every other connection request in hardware.
+    const ble_gap_id_key_t* identityKeys[] = { &ownerBond.peer_id };
+    const uint32_t identityResult =
+        sd_ble_gap_device_identities_set(identityKeys, nullptr, 1);
+    if (identityResult != NRF_SUCCESS) {
+        rtt.printf("[BLE LOCK] identity filter failed err=%lu\n",
+                   (unsigned long)identityResult);
+        return false;
+    }
+
+    const ble_gap_addr_t ownerAddress = ownerIdentityAddress(ownerRecord);
+    const ble_gap_addr_t* whitelist[] = { &ownerAddress };
+    const uint32_t whitelistResult = sd_ble_gap_whitelist_set(whitelist, 1);
+    if (whitelistResult != NRF_SUCCESS) {
+        rtt.printf("[BLE LOCK] whitelist failed err=%lu\n",
+                   (unsigned long)whitelistResult);
+        return false;
+    }
+    return true;
 }
 
 static void startAdvertising() {
-    Bluefruit.Advertising.stop();
+    stopPairingAdvertising();
+
+    if (connected || sleepShutdownRequested ||
+        (pairingLockState != PairingLockState::PairingOpen &&
+         pairingLockState != PairingLockState::OwnerLocked)) {
+        return;
+    }
+
     Bluefruit.Advertising.clearData();
     Bluefruit.ScanResponse.clearData();
 
-    Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+    const bool locked = pairingLockState == PairingLockState::OwnerLocked;
+    Bluefruit.Advertising.addFlags(
+        locked ? BLE_GAP_ADV_FLAG_BR_EDR_NOT_SUPPORTED
+               : BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
     Bluefruit.Advertising.addTxPower();
     Bluefruit.Advertising.addService(gService);
+
+    // Manufacturer Specific Data wire format (little-endian company ID):
+    //   bytes 0..1: Bluetooth SIG company identifier
+    //   byte 2:     status format version
+    //   byte 3:     flags (bit 0 owner bond valid, bit 1 pairing open)
+    // Use ownerRecordValid rather than the advertising policy so the field
+    // describes the verified persistent bond, not an inferred UI state.
+    uint8_t statusFlags = 0u;
+    if (ownerRecordValid) {
+        statusFlags |= BLE_ADV_STATUS_OWNER_BONDED;
+    }
+    if (pairingLockState == PairingLockState::PairingOpen) {
+        statusFlags |= BLE_ADV_STATUS_PAIRING_OPEN;
+    }
+
+    const uint8_t manufacturerData[] = {
+        static_cast<uint8_t>(BLE_COMPANY_IDENTIFIER & 0xFFu),
+        static_cast<uint8_t>((BLE_COMPANY_IDENTIFIER >> 8) & 0xFFu),
+        BLE_ADV_STATUS_VERSION,
+        statusFlags
+    };
+    if (!Bluefruit.Advertising.addManufacturerData(
+            manufacturerData, sizeof(manufacturerData))) {
+        rtt.println("[BLE LOCK] advertising kept off: status data did not fit");
+        return;
+    }
     Bluefruit.ScanResponse.addName();
 
-    Bluefruit.Advertising.restartOnDisconnect(true);
-    Bluefruit.Advertising.setInterval(32, 244); // 20ms fast, 152.5ms slow
-    Bluefruit.Advertising.setFastTimeout(30);
-    const bool started = Bluefruit.Advertising.start(0); // Advertise forever
-    rtt.printf("[BLEL] %lu ADV start=%u\n", millis(), started ? 1u : 0u);
+    const bool filtersReady = locked ? installOwnerPeerFilters()
+                                     : clearControllerPeerFilters();
+    if (!filtersReady) {
+        // Never fall back to open advertising when the owner filter fails.
+        rtt.println("[BLE LOCK] advertising kept off: peer filter unavailable");
+        return;
+    }
+
+    memset(&pairingAdvData, 0, sizeof(pairingAdvData));
+    pairingAdvData.adv_data.p_data = Bluefruit.Advertising.getData();
+    pairingAdvData.adv_data.len = Bluefruit.Advertising.count();
+    pairingAdvData.scan_rsp_data.p_data = Bluefruit.ScanResponse.getData();
+    pairingAdvData.scan_rsp_data.len = Bluefruit.ScanResponse.count();
+
+    ble_gap_adv_params_t parameters = {};
+    parameters.properties.type =
+        BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED;
+    parameters.interval = 244; // 152.5 ms, a good idle power/latency balance.
+    parameters.duration = 0;   // State-machine timers own the open-window limit.
+    parameters.filter_policy =
+        locked ? BLE_GAP_ADV_FP_FILTER_CONNREQ : BLE_GAP_ADV_FP_ANY;
+    parameters.primary_phy = BLE_GAP_PHY_AUTO;
+    parameters.secondary_phy = BLE_GAP_PHY_AUTO;
+
+    uint32_t result = sd_ble_gap_adv_set_configure(
+        &pairingAdvHandle, &pairingAdvData, &parameters);
+    if (result == NRF_SUCCESS) {
+        result = sd_ble_gap_tx_power_set(
+            BLE_GAP_TX_POWER_ROLE_ADV, pairingAdvHandle, Bluefruit.getTxPower());
+    }
+    if (result == NRF_SUCCESS) {
+        result = sd_ble_gap_adv_start(pairingAdvHandle, CONN_CFG_PERIPHERAL);
+    }
+
+    pairingAdvertisingRunning = result == NRF_SUCCESS;
+    rtt.printf("[BLE LOCK] advertising state=%s owner_only=%u status=0x%02X result=%lu\n",
+               pairingAdvertisingRunning ? "on" : "off",
+               locked ? 1u : 0u, statusFlags, (unsigned long)result);
 }
 
 static void onBleConnect(uint16_t conn_handle) {
+    pairingAdvertisingRunning = false;
     currentConnHandle = conn_handle;
     connected = true;
-    connectionHapticPending = BLE_CONNECTION_HAPTIC_ENABLED != 0;
+    applicationAuthorized = false;
+    linkSecured = false;
+    connectedPeerMatchesOwner = false;
+    connectionHapticPending = false;
     connectionHapticPlayed = false;
-    forceTelemetrySync = true;
-    forceLiveSync = true;
+    forceTelemetrySync = false;
+    forceLiveSync = false;
     lastLiveSendMs = 0;
     lastTrainingTelemetrySendMs = 0;
     lastTherapyLiveSendMs = 0;
     lastStatusSendMs = 0;
-    connectedSinceMs = millis();
-    bleLinkSettleStartMs = connectedSinceMs;
-    bleLinkSettleActive = true;
-    rtt.printf("[BLEL] %lu APP_TX_HOLD h=%u ms=%lu\n",
-               connectedSinceMs, conn_handle,
-               (unsigned long)BLE_LINK_SETTLE_MS);
+    connectedSinceMs = 0UL;
+    bleLinkSettleStartMs = 0UL;
+    bleLinkSettleActive = false;
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
     syncReset();
-    // Optional link optimizations are independently switchable for phone
-    // compatibility testing. Neither request is required to keep BLE connected.
+
     BLEConnection* conn = Bluefruit.Connection(conn_handle);
-    if (conn) {
-        bool dlRequested = false;
-        bool phyRequested = false;
-#if BLE_REQUEST_DATA_LENGTH_ON_CONNECT
-        dlRequested = conn->requestDataLengthUpdate();
-#endif
-#if BLE_REQUEST_PHY_ON_CONNECT
-        phyRequested = conn->requestPHY();
-#endif
-        rtt.printf("[BLEL] %lu LOCAL_REQ h=%u dl=%u/%u phy=%u/%u\n",
-                   millis(), conn_handle,
-                   (unsigned)BLE_REQUEST_DATA_LENGTH_ON_CONNECT,
-                   dlRequested ? 1u : 0u,
-                   (unsigned)BLE_REQUEST_PHY_ON_CONNECT,
-                   phyRequested ? 1u : 0u);
+    if (!conn) {
+        pendingUnauthorizedDisconnect = true;
+    } else if (pairingLockState == PairingLockState::PairingOpen) {
+        // The physical action opened enrollment.  Encryption is initiated
+        // immediately; application data remains blocked until the resulting
+        // bond has been persisted as the sole owner.
+        claimAuthSucceeded = false;
+        claimLinkSecured = false;
+        pendingClaimIdentity = conn->getPeerAddr();
+        securityDeadlineStartedMs = millis();
+        const bool requested = conn->requestPairing();
+        rtt.printf("[BLE LOCK] enrollment connected; pairing request=%u\n",
+                   requested ? 1u : 0u);
+    } else if (pairingLockState == PairingLockState::OwnerLocked) {
+        connectedPeerMatchesOwner = peerMatchesStoredOwner(conn->getPeerAddr());
+        if (connectedPeerMatchesOwner) {
+            pairingLockState = PairingLockState::OwnerSecuring;
+            securityDeadlineStartedMs = millis();
+            const bool requested = conn->requestPairing();
+            rtt.printf("[BLE LOCK] owner connected; encrypt request=%u\n",
+                       requested ? 1u : 0u);
+        } else {
+            // This is a second line of defence behind the controller
+            // whitelist, useful if a stack/configuration regression occurs.
+            pendingUnauthorizedDisconnect = true;
+            rtt.println("[BLE LOCK] rejected non-owner connection");
+        }
+    } else {
+        pendingUnauthorizedDisconnect = true;
+        rtt.println("[BLE LOCK] rejected connection in closed state");
     }
+
     turnRgbLedOff();
-    // RTT trace intentionally disabled here.
-    // Uncomment if you want connection events mirrored locally again.
-    // rtt.println("[BLE EVT] connected");
 }
 
 static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     (void)conn_handle;
     connected = false;
     currentConnHandle = BLE_CONN_HANDLE_INVALID;
+    applicationAuthorized = false;
+    linkSecured = false;
+    connectedPeerMatchesOwner = false;
     bleLinkSettleActive = false;
     // Abandon any in-flight transfer: nothing was marked sent, so the whole
     // window simply re-streams on the next FETCH_SESSIONS.
@@ -771,9 +1131,11 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     rtt.print(bleDisconnectReasonText(reason));
     rtt.println(")");
 
-    if (clearBondsAfterDisconnect) {
-        clearBondsAfterDisconnect = false;
-        Bluefruit.Periph.clearBonds();
+    if (pairingLockState == PairingLockState::OwnerAuthorized ||
+        pairingLockState == PairingLockState::OwnerSecuring) {
+        pairingLockState = PairingLockState::OwnerLocked;
+    } else if (pairingLockState == PairingLockState::Revoking) {
+        pendingUnlockFinalize = true;
     }
 
     if (sleepShutdownRequested) {
@@ -781,7 +1143,9 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
         return;
     }
 
-    startAdvertising();
+    // Do not touch the SoftDevice advertiser from the callback task.  The
+    // main loop performs the state-aware restart after this event unwinds.
+    pendingAdvertisingRestart = true;
 }
 
 static void onBlePairComplete(uint16_t conn_handle, uint8_t auth_status) {
@@ -789,20 +1153,267 @@ static void onBlePairComplete(uint16_t conn_handle, uint8_t auth_status) {
     rtt.print("[BLE SEC] pairing complete status=0x");
     rtt.println(auth_status, HEX);
 
-    if (auth_status == BLE_GAP_SEC_STATUS_SUCCESS) {
-        blePairingKnownPaired = true;
-        pairingUnlockActive = false;
-        saveBlePairMarker(true);
-    }
 }
 
 static void onBleSecured(uint16_t conn_handle) {
-    (void)conn_handle;
-    blePairingKnownPaired = true;
-    pairingUnlockActive = false;
-    connectionHapticPending = BLE_CONNECTION_HAPTIC_ENABLED != 0;
-    saveBlePairMarker(true);
+    pendingSecuredHandle = conn_handle;
+    pendingSecuredEvent = true;
     rtt.println("[BLE SEC] link encrypted");
+}
+
+static void authorizeCurrentLink(unsigned long now) {
+    if (!connected || currentConnHandle == BLE_CONN_HANDLE_INVALID ||
+        !linkSecured || !ownerRecordValid) {
+        return;
+    }
+
+    applicationAuthorized = true;
+    pairingLockState = PairingLockState::OwnerAuthorized;
+    connectedSinceMs = now;
+    bleLinkSettleStartMs = now;
+    bleLinkSettleActive = true;
+    connectionHapticPending = BLE_CONNECTION_HAPTIC_ENABLED != 0;
+    connectionHapticPlayed = false;
+    forceTelemetrySync = true;
+    forceLiveSync = true;
+    securityDeadlineStartedMs = 0UL;
+    turnRgbLedOff();
+
+    // Link tuning starts only after identity and encryption are established;
+    // it cannot accidentally grant an unauthenticated connection more time.
+    BLEConnection* conn = Bluefruit.Connection(currentConnHandle);
+    if (conn) {
+        bool dlRequested = false;
+        bool phyRequested = false;
+#if BLE_REQUEST_DATA_LENGTH_ON_CONNECT
+        dlRequested = conn->requestDataLengthUpdate();
+#endif
+#if BLE_REQUEST_PHY_ON_CONNECT
+        phyRequested = conn->requestPHY();
+#endif
+        rtt.printf("[BLE LOCK] owner authorized h=%u dl=%u phy=%u\n",
+                   currentConnHandle, dlRequested ? 1u : 0u,
+                   phyRequested ? 1u : 0u);
+    }
+}
+
+static void initializePairingLock() {
+    BleOwnerRecord stored = {};
+    const bool recordLoaded = loadOwnerRecord(stored);
+
+    if (recordLoaded &&
+        (stored.flags & BLE_OWNER_REVOCATION_PENDING) == 0u &&
+        loadAndVerifyOwnerBond(stored, ownerBond)) {
+        ownerRecord = stored;
+        ownerRecordValid = true;
+        pairingLockState = PairingLockState::OwnerLocked;
+        rtt.println("[BLE LOCK] persisted owner verified; lock enabled");
+        return;
+    }
+
+    // A missing/corrupt record, a missing bond, or an interrupted revocation
+    // is deliberately fail-closed.  Legacy one-byte pairing markers are not
+    // owner identities, so their bonds are removed during this migration.
+    Bluefruit.Periph.clearBonds();
+    clearOwnerRecordFiles();
+    memset(&ownerRecord, 0, sizeof(ownerRecord));
+    memset(&ownerBond, 0, sizeof(ownerBond));
+    ownerRecordValid = false;
+    pairingLockState = PairingLockState::NoOwnerClosed;
+    rtt.println("[BLE LOCK] no verified owner; double-click in IDLE to pair");
+}
+
+static void finalizePairingUnlock(unsigned long now) {
+    if (connected) return;
+
+    const unsigned long previousWindowStart = pairingWindowStartedMs;
+    const bool preserveWindow = preservePairingWindowOnCleanup;
+    const bool reusePreviousWindow = preserveWindow && previousWindowStart != 0UL;
+
+    stopPairingAdvertising();
+    clearControllerPeerFilters();
+    Bluefruit.Periph.clearBonds();
+    clearOwnerRecordFiles();
+    memset(&ownerRecord, 0, sizeof(ownerRecord));
+    memset(&ownerBond, 0, sizeof(ownerBond));
+    ownerRecordValid = false;
+    applicationAuthorized = false;
+    connectedPeerMatchesOwner = false;
+    linkSecured = false;
+    claimAuthSucceeded = false;
+    claimLinkSecured = false;
+    claimStartedMs = 0UL;
+    securityDeadlineStartedMs = 0UL;
+    pendingUnlockFinalize = false;
+    pendingUnauthorizedDisconnect = false;
+    pendingSecuredEvent = false;
+    pendingAuthEvent = false;
+    preservePairingWindowOnCleanup = false;
+
+    // A failed enrollment attempt must not extend the physical-access window.
+    // A fresh button unlock gets a new full window; cleanup after a failed
+    // claim reuses the original deadline.
+    if (reusePreviousWindow &&
+        (uint32_t)(now - previousWindowStart) >= BLE_PAIRING_WINDOW_MS) {
+        pairingWindowStartedMs = 0UL;
+        pairingLockState = PairingLockState::NoOwnerClosed;
+        turnRgbLedOff();
+        rtt.println("[BLE LOCK] failed claim cleanup reached window deadline");
+        return;
+    }
+
+    pairingWindowStartedMs = reusePreviousWindow ? previousWindowStart : now;
+    pairingLockState = PairingLockState::PairingOpen;
+
+    const unsigned long elapsed =
+        reusePreviousWindow ? (uint32_t)(now - pairingWindowStartedMs) : 0UL;
+    rtt.printf("[BLE LOCK] pairing window open for %lu ms\n",
+               (unsigned long)(BLE_PAIRING_WINDOW_MS - elapsed));
+    startAdvertising();
+}
+
+static void abandonOwnerClaim(unsigned long now, const char* reason) {
+    rtt.printf("[BLE LOCK] owner claim abandoned: %s\n", reason);
+    pairingLockState = PairingLockState::Revoking;
+    pendingUnlockFinalize = true;
+    claimAuthSucceeded = false;
+    claimLinkSecured = false;
+    claimStartedMs = now;
+    preservePairingWindowOnCleanup = true;
+
+    if (connected && currentConnHandle != BLE_CONN_HANDLE_INVALID) {
+        Bluefruit.disconnect(currentConnHandle);
+    } else {
+        finalizePairingUnlock(now);
+    }
+}
+
+static void processPairingLock(unsigned long now) {
+    if (pendingUnauthorizedDisconnect) {
+        pendingUnauthorizedDisconnect = false;
+        applicationAuthorized = false;
+        linkSecured = false;
+        pendingSecuredEvent = false;
+        pendingAuthEvent = false;
+        if (connected && currentConnHandle != BLE_CONN_HANDLE_INVALID) {
+            rtt.println("[BLE LOCK] disconnecting unauthorized peer");
+            Bluefruit.disconnect(currentConnHandle);
+            // A security-update event may already be queued behind a rejected
+            // pairing request.  Never evaluate it in the same loop iteration.
+            return;
+        }
+    }
+
+    if (pendingUnlockFinalize && !connected) {
+        finalizePairingUnlock(now);
+    }
+
+    if (pendingSecuredEvent) {
+        const uint16_t securedHandle = pendingSecuredHandle;
+        pendingSecuredEvent = false;
+        pendingSecuredHandle = BLE_CONN_HANDLE_INVALID;
+
+        if (connected && securedHandle == currentConnHandle) {
+            linkSecured = true;
+            if (pairingLockState == PairingLockState::OwnerSecuring &&
+                connectedPeerMatchesOwner) {
+                authorizeCurrentLink(now);
+            } else if (pairingLockState == PairingLockState::PairingOpen ||
+                       pairingLockState == PairingLockState::ClaimCommitting) {
+                claimLinkSecured = true;
+            }
+        }
+    }
+
+    if (pendingAuthEvent) {
+        const uint8_t authStatus = pendingAuthStatus;
+        const bool bonded = pendingAuthBonded;
+        pendingAuthEvent = false;
+
+        if (pairingLockState == PairingLockState::PairingOpen ||
+            pairingLockState == PairingLockState::ClaimCommitting) {
+            if (authStatus == BLE_GAP_SEC_STATUS_SUCCESS && bonded) {
+                claimAuthSucceeded = true;
+                pairingLockState = PairingLockState::ClaimCommitting;
+                claimStartedMs = now;
+                lastClaimLoadAttemptMs = 0UL;
+                rtt.println("[BLE LOCK] encrypted bond complete; committing owner");
+            } else {
+                abandonOwnerClaim(now, "pairing failed or peer refused bonding");
+            }
+        }
+    }
+
+    if (pairingLockState == PairingLockState::ClaimCommitting &&
+        claimAuthSucceeded && claimLinkSecured &&
+        (lastClaimLoadAttemptMs == 0UL ||
+         (uint32_t)(now - lastClaimLoadAttemptMs) >= 50UL)) {
+        lastClaimLoadAttemptMs = now;
+        bond_keys_t newBond = {};
+
+        // Bluefruit saves bonds on its callback queue.  Poll briefly until
+        // that atomic bond file is visible, then bind our owner record to it.
+        if (bond_load_keys(BLE_GAP_ROLE_PERIPH,
+                           &pendingClaimIdentity, &newBond)) {
+            BleOwnerRecord newRecord = {};
+            fillOwnerRecord(newRecord, newBond.peer_id.id_addr_info,
+                            newBond, BLE_OWNER_VALID);
+            if (saveOwnerRecord(newRecord)) {
+                ownerRecord = newRecord;
+                ownerBond = newBond;
+                ownerRecordValid = true;
+                claimAuthSucceeded = false;
+                claimLinkSecured = false;
+                rtt.println("[BLE LOCK] owner committed; future connections owner-only");
+
+                if (connected) {
+                    connectedPeerMatchesOwner = true;
+                    authorizeCurrentLink(now);
+                } else {
+                    pairingLockState = PairingLockState::OwnerLocked;
+                    startAdvertising();
+                }
+            } else {
+                abandonOwnerClaim(now, "owner record write failed");
+            }
+        }
+    }
+
+    if (pairingLockState == PairingLockState::ClaimCommitting &&
+        claimStartedMs != 0UL &&
+        (uint32_t)(now - claimStartedMs) >= BLE_OWNER_CLAIM_TIMEOUT_MS) {
+        abandonOwnerClaim(now, "bond-store commit timed out");
+    }
+
+    if (pairingLockState == PairingLockState::PairingOpen && connected &&
+        securityDeadlineStartedMs != 0UL &&
+        (uint32_t)(now - securityDeadlineStartedMs) >= BLE_SECURITY_TIMEOUT_MS) {
+        abandonOwnerClaim(now, "encryption timed out");
+    }
+
+    if (pairingLockState == PairingLockState::OwnerSecuring && connected &&
+        securityDeadlineStartedMs != 0UL &&
+        (uint32_t)(now - securityDeadlineStartedMs) >= BLE_SECURITY_TIMEOUT_MS) {
+        pendingUnauthorizedDisconnect = true;
+        rtt.println("[BLE LOCK] owner encryption timed out");
+    }
+
+    if (pairingLockState == PairingLockState::PairingOpen &&
+        pairingWindowStartedMs != 0UL &&
+        (uint32_t)(now - pairingWindowStartedMs) >= BLE_PAIRING_WINDOW_MS) {
+        pairingLockState = PairingLockState::NoOwnerClosed;
+        stopPairingAdvertising();
+        if (connected && currentConnHandle != BLE_CONN_HANDLE_INVALID) {
+            Bluefruit.disconnect(currentConnHandle);
+        }
+        turnRgbLedOff();
+        rtt.println("[BLE LOCK] pairing window expired; radio closed");
+    }
+
+    if (pendingAdvertisingRestart && !connected) {
+        pendingAdvertisingRestart = false;
+        startAdvertising();
+    }
 }
 
 static bool applyMode(const String &valueRaw) {
@@ -1860,9 +2471,17 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
 }
 
 static void onCharacteristicWrite(uint16_t conn_handle, BLECharacteristic *chr, uint8_t *data, uint16_t len) {
-    (void)conn_handle;
     (void)chr;
     if (data == nullptr || len == 0) return;
+
+    // GATT encryption protects the radio packet, while this gate protects the
+    // application.  Commands are accepted only after the encrypted peer has
+    // also been matched to (or committed as) the persistent owner.
+    if (!applicationAuthorized || conn_handle != currentConnHandle) {
+        rtt.printf("[BLE LOCK] dropped RX before owner authorization h=%u\n",
+                   conn_handle);
+        return;
+    }
 
     String payload;
     payload.reserve(len);
@@ -1883,8 +2502,6 @@ void bluetoothSetup() {
     turnRgbLedOff();
     batteryMonitor.begin();
     updateBatteryReading(millis());
-    blePairingKnownPaired = loadBlePairMarker();
-    pairingUnlockActive = !blePairingKnownPaired;
 
     if (!bleInitialized) {
         Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
@@ -1896,6 +2513,9 @@ void bluetoothSetup() {
         Bluefruit.autoConnLed(false); // Disable auto LED blinking on PIN_LED1/PIN_LED2 (P0.17/P0.19)
         Bluefruit.setName(BLE_DEVICE_NAME);
         Bluefruit.setTxPower(4); // dBm
+        // Custom advertising below owns disconnect restarts because it must
+        // select either an open policy or the controller owner whitelist.
+        Bluefruit.Advertising.restartOnDisconnect(false);
         rtt.printf("[BLEL] %lu CFG dl=%u phy=%u hold=%lu sup=%lu haptic=%u ppcp=%u\n",
                    millis(),
                    (unsigned)BLE_REQUEST_DATA_LENGTH_ON_CONNECT,
@@ -1925,6 +2545,7 @@ void bluetoothSetup() {
         rttDebuggerPrintBlePacket("TX", "{}");
 
         pCharacteristic = &gCharacteristic;
+        initializePairingLock();
         bleInitialized = true;
     }
 
@@ -1935,6 +2556,7 @@ void bluetoothLoop() {
     if (!pCharacteristic) return;
 
     const unsigned long now = millis();
+    processPairingLock(now);
     const bool appTxAllowed = bleApplicationTxAllowed(now);
 
     if (pendingProfileListSend && appTxAllowed) {
@@ -1951,7 +2573,8 @@ void bluetoothLoop() {
         return;
     }
 
-    if (connected && connectionHapticPending && !connectionHapticPlayed &&
+    if (connected && applicationAuthorized &&
+        connectionHapticPending && !connectionHapticPlayed &&
         !calibrationMotorActive() &&
         connectedSinceMs != 0UL &&
         (now - connectedSinceMs) >= CONNECTION_HAPTIC_DELAY_MS) {
@@ -2063,8 +2686,11 @@ void bluetoothLoop() {
 
     if (pendingFactoryReset) {
         pendingFactoryReset = false;
+        applicationAuthorized = false;
+        stopPairingAdvertising();
+        Bluefruit.Periph.clearBonds();
+        clearOwnerRecordFiles();
         storageFactoryReset();
-        saveBlePairMarker(false);
         NVIC_SystemReset();
         return;
     }
@@ -2174,7 +2800,7 @@ void bluetoothStartAdvertising() {
 
 void bluetoothStopAdvertising() {
     // rtt.println("[BLE EVT] stop advertising");
-    Bluefruit.Advertising.stop();
+    stopPairingAdvertising();
 }
 
 void bluetoothPrepareForSleep() {
@@ -2192,29 +2818,50 @@ bool bluetoothIsConnected() {
     return connected;
 }
 
-void bluetoothUnlockForPairing() {
-    // rtt.println("[BLE EVT] unlock pairing - clearing bonds");
+bool bluetoothIsAuthorized() {
+    return connected && applicationAuthorized;
+}
 
+bool bluetoothPairingWindowIsOpen() {
+    return pairingLockState == PairingLockState::PairingOpen ||
+           pairingLockState == PairingLockState::ClaimCommitting;
+}
+
+void bluetoothUnlockForPairing() {
+    // Called only from the physical Idle-mode double click.  First persist a
+    // revocation intent; if power is lost during the transition, boot sees
+    // that marker and removes the old bond instead of silently restoring it.
     batteryBlinkActive = false;
-    pairingUnlockActive = true;
-    blePairingKnownPaired = false;
-    clearBondsAfterDisconnect = false;
+    applicationAuthorized = false;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
     connectedSinceMs = 0UL;
     bleLinkSettleActive = false;
-    saveBlePairMarker(false);
+    stopPairingAdvertising();
 
-    Bluefruit.Advertising.restartOnDisconnect(true);
+    if (ownerRecordValid) {
+        BleOwnerRecord revokingRecord = ownerRecord;
+        revokingRecord.flags = BLE_OWNER_VALID | BLE_OWNER_REVOCATION_PENDING;
+        if (!saveOwnerRecord(revokingRecord)) {
+            // Removing the owner file is also crash-safe: boot treats a bond
+            // with no matching owner record as invalid and clears it.
+            clearOwnerRecordFiles();
+        }
+    }
+
+    pairingLockState = PairingLockState::Revoking;
+    pendingUnlockFinalize = true;
+    preservePairingWindowOnCleanup = false;
+    rtt.println("[BLE LOCK] physical unlock requested");
 
     if (currentConnHandle != BLE_CONN_HANDLE_INVALID && Bluefruit.connected(currentConnHandle)) {
-        clearBondsAfterDisconnect = true;
         Bluefruit.disconnect(currentConnHandle);
         return;
     }
 
-    Bluefruit.Periph.clearBonds();
-    startAdvertising();
+    // No callback will arrive when already disconnected, so the main loop can
+    // finish the bond deletion and open the timed enrollment window directly.
+    finalizePairingUnlock(millis());
 }
 
 void bluetoothRequestCalibrationStart() {
@@ -2239,7 +2886,7 @@ void notifyNewSessionStored() {
     // Called from the main loop right after a promoted session lands in the
     // log. If the app is connected it gets a SESS_AVAIL hint on the next
     // idle tick and can FETCH_SESSIONS immediately (live-to-stored handoff).
-    if (connected) {
+    if (connected && applicationAuthorized) {
         sessAvailPending = true;
     }
 }

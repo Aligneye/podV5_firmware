@@ -1,3 +1,12 @@
+> **Pairing-lock update (October 19, 2026):** Advertising ab hamesha open
+> nahi hoti. Verified owner hone par SoftDevice whitelist sirf bonded owner ko
+> connect karne deti hai. Owner na ho toh pod closed rehta hai jab tak Idle
+> mode double-click 120-second pairing window na khole. App commands aur pod
+> notifications stored owner ki encrypted link authorize hone ke baad hi
+> chalte hain. Exact state machine, app contract aur recovery behavior ke liye
+> `secure_ble_pairing_lock_plan.md` dekhein. Neeche ka purana generic BLE
+> walkthrough pairing/security behavior ke liye authoritative nahi hai.
+
 Ye sab required header files include ki gayi hain jisse Bluetooth module dusre modules ke functions use kar sake.
 bluetooth.h → Bluetooth related declarations
 calibration.h → Calibration functions
