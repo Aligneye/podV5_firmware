@@ -37,8 +37,9 @@ identity or security check.
 
 The pod has one of three externally relevant conditions:
 
-1. **Unowned and closed**: it does not advertise and cannot be paired until the
-   user physically opens pairing.
+1. **Unowned and closed**: it advertises continuously while awake so the app
+   can discover it, but the advertisement is non-connectable. It cannot be
+   paired until the user physically opens pairing.
 2. **Pairing open**: an Idle-mode double click opens a 120-second window. The
    red LED blinks and one phone may establish a new encrypted bond. Leaving
    Idle closes the window immediately.
@@ -286,7 +287,8 @@ guided enrollment flow.
 
 | Observation | Likely meaning | App action |
 |---|---|---|
-| Pod is not found | Unowned pod is closed, pod is asleep, powered off, or out of range | For setup, ask for Idle double-click; otherwise retry scan/backoff |
+| Pod is not found | Pod is asleep, powered off, out of range, or advertising failed | Retry scan/backoff and check that the pod is awake |
+| Pod is visible and neither status bit is set | Pod is unowned but its pairing window is closed | Show the pod as discoverable but not ready; ask for an Idle double-click before connecting |
 | Pod is visible, owner-bond bit is set, and connection times out/fails | Pod is locked to another owner, this phone has a stale bond, or radio conditions are poor | Show owner/stale-bond guidance; ask for physical unlock only when the user intends ownership transfer |
 | Pod is visible and pairing-open bit is set | The pod is accepting one new owner bond | Start the guided pairing flow before the 120-second window expires |
 | Connects then disconnects quickly | New pairing was attempted while locked, or bond restoration failed | Stop retry loop and show stale-bond/ownership guidance |
@@ -410,6 +412,7 @@ Before release, verify the following on both supported Android and iOS
 versions:
 
 - A closed unowned pod is not presented as ready to pair.
+- A closed unowned pod remains visible in scans while awake.
 - Idle double-click opens setup and the red LED blinks.
 - First bonding reaches `ready` and returns a stable serial.
 - The same phone reconnects after disconnect, pod reboot, and app restart.
