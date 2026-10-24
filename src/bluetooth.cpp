@@ -1005,7 +1005,8 @@ static void startAdvertising() {
 
     if (connected || sleepShutdownRequested ||
         (pairingLockState != PairingLockState::PairingOpen &&
-         pairingLockState != PairingLockState::OwnerLocked)) {
+         pairingLockState != PairingLockState::OwnerLocked &&
+         pairingLockState != PairingLockState::NoOwnerClosed)) {
         return;
     }
 
@@ -1013,6 +1014,7 @@ static void startAdvertising() {
     Bluefruit.ScanResponse.clearData();
 
     const bool locked = pairingLockState == PairingLockState::OwnerLocked;
+    const bool connectable = pairingLockState != PairingLockState::NoOwnerClosed;
     Bluefruit.Advertising.addFlags(
         locked ? BLE_GAP_ADV_FLAG_BR_EDR_NOT_SUPPORTED
                : BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
@@ -1062,7 +1064,8 @@ static void startAdvertising() {
 
     ble_gap_adv_params_t parameters = {};
     parameters.properties.type =
-        BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED;
+        connectable ? BLE_GAP_ADV_TYPE_CONNECTABLE_SCANNABLE_UNDIRECTED
+                    : BLE_GAP_ADV_TYPE_NONCONNECTABLE_SCANNABLE_UNDIRECTED;
     parameters.interval = 244; // 152.5 ms, a good idle power/latency balance.
     parameters.duration = 0;   // State-machine timers own the open-window limit.
     parameters.filter_policy =
@@ -1081,9 +1084,10 @@ static void startAdvertising() {
     }
 
     pairingAdvertisingRunning = result == NRF_SUCCESS;
-    rtt.printf("[BLE LOCK] advertising state=%s owner_only=%u status=0x%02X result=%lu\n",
+    rtt.printf("[BLE LOCK] advertising state=%s connectable=%u owner_only=%u status=0x%02X result=%lu\n",
                pairingAdvertisingRunning ? "on" : "off",
-               locked ? 1u : 0u, statusFlags, (unsigned long)result);
+               connectable ? 1u : 0u, locked ? 1u : 0u, statusFlags,
+               (unsigned long)result);
 }
 
 static void onBleConnect(uint16_t conn_handle) {
@@ -1301,7 +1305,8 @@ static void finalizePairingUnlock(unsigned long now) {
         pairingWindowStartedMs = 0UL;
         pairingLockState = PairingLockState::NoOwnerClosed;
         turnRgbLedOff();
-        rtt.println("[BLE LOCK] pairing window closed on mode change");
+        rtt.println("[BLE LOCK] pairing window closed; background advertising resumed");
+        startAdvertising();
         return;
     }
 
@@ -1314,6 +1319,7 @@ static void finalizePairingUnlock(unsigned long now) {
         pairingLockState = PairingLockState::NoOwnerClosed;
         turnRgbLedOff();
         rtt.println("[BLE LOCK] failed claim cleanup reached window deadline");
+        startAdvertising();
         return;
     }
 
@@ -1484,7 +1490,10 @@ static void processPairingLock(unsigned long now) {
             Bluefruit.disconnect(currentConnHandle);
         }
         turnRgbLedOff();
-        rtt.println("[BLE LOCK] pairing window expired; radio closed");
+        rtt.println("[BLE LOCK] pairing window expired; background advertising resumed");
+        if (!connected) {
+            startAdvertising();
+        }
     }
 
     if (pendingAdvertisingRestart && !connected) {

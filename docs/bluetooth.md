@@ -1,7 +1,8 @@
-> **Pairing-lock update (October 19, 2026):** Advertising ab hamesha open
-> nahi hoti. Verified owner hone par SoftDevice whitelist sirf bonded owner ko
-> connect karne deti hai. Owner na ho toh pod closed rehta hai jab tak Idle
-> mode double-click 120-second pairing window na khole. App commands aur pod
+> **Pairing-lock update (October 24, 2026):** Verified owner hone par
+> SoftDevice whitelist sirf bonded owner ko connect karne deti hai. Owner na
+> ho toh pod background me non-connectable advertising karta rehta hai, jisse
+> app usse discover kar sakti hai. Connection/pairing tabhi enable hoti hai jab
+> Idle mode double-click 120-second pairing window khole. App commands aur pod
 > notifications stored owner ki encrypted link authorize hone ke baad hi
 > chalte hain. Exact state machine, app contract aur recovery behavior ke liye
 > `secure_ble_pairing_lock_plan.md` dekhein. Neeche ka purana generic BLE
