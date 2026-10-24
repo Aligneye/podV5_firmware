@@ -40,8 +40,8 @@ static unsigned long lastLiveSendMs = 0;
 static unsigned long lastTrainingTelemetrySendMs = 0;
 static unsigned long lastTherapyLiveSendMs = 0;
 static unsigned long lastStatusSendMs = 0;
-static unsigned long bleLinkSettleStartMs = 0;
-static bool bleLinkSettleActive = false;
+static volatile bool notificationsEnabled = false;
+static bool applicationTxReadyLogged = false;
 
 static bool telemetryCacheValid = false;
 static char lastMode[12] = "";
@@ -115,12 +115,13 @@ static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 500UL;
 static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t STATUS_PACKET_INTERVAL_MS = 5000UL;
-static constexpr uint32_t BLE_LINK_SETTLE_MS = 5000UL;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
 static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
 static constexpr uint16_t CONNECTION_HAPTIC_MS = 150U;
+static constexpr uint32_t REMOTE_UNPAIR_ACK_TIMEOUT_MS = 3000UL;
+static constexpr uint32_t REMOTE_UNPAIR_DISCONNECT_DELAY_MS = 400UL;
 static const char* BLE_PAIR_MARKER_PATH = "/ble_pair.dat"; // Removed during migration.
 
 // -------------------------------------------------------------------------
@@ -182,6 +183,7 @@ static unsigned long lastClaimLoadAttemptMs = 0;
 // to bluetoothLoop(), which runs on the main firmware task.
 static volatile bool pendingAdvertisingRestart = false;
 static volatile bool pendingUnlockFinalize = false;
+static volatile bool pendingPairingWindowClose = false;
 static volatile bool pendingUnauthorizedDisconnect = false;
 static volatile bool pendingSecuredEvent = false;
 static volatile uint16_t pendingSecuredHandle = BLE_CONN_HANDLE_INVALID;
@@ -192,6 +194,21 @@ static ble_gap_addr_t pendingClaimIdentity = {};
 static bool claimAuthSucceeded = false;
 static bool claimLinkSecured = false;
 static bool preservePairingWindowOnCleanup = false;
+static bool closePairingWindowAfterCleanup = false;
+
+// A successful UNPAIR command is acknowledged before ownership is revoked.
+// The BLE callback only queues the request; notification, delay, flash work,
+// disconnect, and advertising transitions all run from bluetoothLoop().
+enum class RemoteUnpairState : uint8_t {
+    Idle,
+    AckPending,
+    AckSentWaiting
+};
+
+static volatile RemoteUnpairState remoteUnpairState = RemoteUnpairState::Idle;
+static volatile uint32_t remoteUnpairSeq = 0u;
+static volatile unsigned long remoteUnpairQueuedMs = 0UL;
+static unsigned long remoteUnpairAckSentMs = 0UL;
 
 // We use a small SoftDevice advertiser instead of Bluefruit.Advertising.start()
 // because this version of Bluefruit hardcodes BLE_GAP_ADV_FP_ANY.  Owning the
@@ -204,30 +221,33 @@ static ble_gap_adv_data_t pairingAdvData = {};
 static void startAdvertising();
 static void stopPairingAdvertising();
 static void processPairingLock(unsigned long now);
+static bool processRemoteUnpair(unsigned long now);
+static void beginPairingUnlock(const char* source);
 
 static void updateBatteryReading(unsigned long now);
 
 static bool bleApplicationTxAllowed(unsigned long now) {
-    // Encryption alone is insufficient: during an open pairing window a
-    // non-owner can be connected while the bond is still being evaluated.
-    if (!connected || !applicationAuthorized) return false;
-    if (!bleLinkSettleActive) return true;
-    if ((uint32_t)(now - bleLinkSettleStartMs) < BLE_LINK_SETTLE_MS) {
-        return false;
-    }
+    // Owner identity and encryption remain mandatory. Once authorized, use
+    // the actual notification subscription as the readiness signal instead
+    // of imposing a fixed delay on every bonded reconnect.
+    if (!connected || !applicationAuthorized || !pCharacteristic) return false;
+    if (!notificationsEnabled && !pCharacteristic->notifyEnabled()) return false;
 
-    bleLinkSettleActive = false;
-    forceTelemetrySync = true;
-    forceLiveSync = true;
-    lastLiveSendMs = 0;
-    lastTrainingTelemetrySendMs = 0;
-    lastTherapyLiveSendMs = 0;
-    lastStatusSendMs = 0;
-    rtt.printf("[BLEL] %lu APP_TX_OPEN h=%u\n", now, currentConnHandle);
+    notificationsEnabled = true;
+    if (!applicationTxReadyLogged) {
+        applicationTxReadyLogged = true;
+        forceTelemetrySync = true;
+        forceLiveSync = true;
+        lastLiveSendMs = 0;
+        lastTrainingTelemetrySendMs = 0;
+        lastTherapyLiveSendMs = 0;
+        lastStatusSendMs = 0;
+        rtt.printf("[BLEL] %lu APP_TX_OPEN h=%u\n", now, currentConnHandle);
+    }
     return true;
 }
 
-static bool sendBlePacket(const char* payload) {
+static bool sendBlePacketInternal(const char* payload) {
     if (!pCharacteristic || !payload || !bleApplicationTxAllowed(millis())) {
         return false;
     }
@@ -253,8 +273,14 @@ static bool sendBlePacket(const char* payload) {
     return notified;
 }
 
-static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* error = nullptr) {
-    if (!cmd || cmd[0] == '\0') return;
+static bool sendBlePacket(const char* payload) {
+    return sendBlePacketInternal(payload);
+}
+
+static bool sendCommandAck(uint32_t seq, const char* cmd, bool ok,
+                           const char* error = nullptr) {
+    (void)error;
+    if (!cmd || cmd[0] == '\0') return false;
     char payload[192];
     if (ok) {
         snprintf(payload, sizeof(payload),
@@ -265,7 +291,7 @@ static void sendCommandAck(uint32_t seq, const char* cmd, bool ok, const char* e
                  "{\"t\":\"ACK\",\"seq\":%lu,\"cmd\":\"%s\",\"ok\":false}",
                  (unsigned long)seq, cmd);
     }
-    sendBlePacket(payload);
+    return sendBlePacketInternal(payload);
 }
 
 static void getDeviceSerial(char* out, size_t outSize) {
@@ -687,6 +713,14 @@ static void onBleRawEvent(ble_evt_t* evt) {
 static void onBleCccdWrite(uint16_t conn_handle, BLECharacteristic* chr,
                            uint16_t value) {
     (void)chr;
+    if (conn_handle == currentConnHandle) {
+        // Bit 0 enables notifications. This is the real application-transport
+        // readiness event; it replaces the former unconditional 5 s delay.
+        notificationsEnabled = (value & 0x0001u) != 0u;
+        if (!notificationsEnabled) {
+            applicationTxReadyLogged = false;
+        }
+    }
     rtt.printf("[BLEL] %lu CCCD h=%u v=0x%04X\n",
                millis(), conn_handle, value);
 }
@@ -1068,8 +1102,8 @@ static void onBleConnect(uint16_t conn_handle) {
     lastTherapyLiveSendMs = 0;
     lastStatusSendMs = 0;
     connectedSinceMs = 0UL;
-    bleLinkSettleStartMs = 0UL;
-    bleLinkSettleActive = false;
+    notificationsEnabled = false;
+    applicationTxReadyLogged = false;
     therapyPlanSentForSession = false;
     lastTherapyPlanSessionId = 0;
     syncReset();
@@ -1117,7 +1151,8 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     applicationAuthorized = false;
     linkSecured = false;
     connectedPeerMatchesOwner = false;
-    bleLinkSettleActive = false;
+    notificationsEnabled = false;
+    applicationTxReadyLogged = false;
     // Abandon any in-flight transfer: nothing was marked sent, so the whole
     // window simply re-streams on the next FETCH_SESSIONS.
     syncReset();
@@ -1125,6 +1160,11 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
     connectionHapticPlayed = false;
     forceLiveSync = false;
     connectedSinceMs = 0UL;
+    if (remoteUnpairState == RemoteUnpairState::AckPending) {
+        remoteUnpairState = RemoteUnpairState::Idle;
+        remoteUnpairSeq = 0u;
+        remoteUnpairQueuedMs = 0UL;
+    }
     rtt.print("[BLE EVT] disconnected reason=0x");
     rtt.print(reason, HEX);
     rtt.print(" (");
@@ -1140,6 +1180,13 @@ static void onBleDisconnect(uint16_t conn_handle, uint8_t reason) {
 
     if (sleepShutdownRequested) {
         sleepShutdownRequested = false;
+        return;
+    }
+
+    // If the app closes the link after receiving the UNPAIR ACK, keep the
+    // radio quiet until the 400 ms grace period finishes and revocation opens
+    // unrestricted pairing. Do not briefly restart owner-only advertising.
+    if (remoteUnpairState == RemoteUnpairState::AckSentWaiting) {
         return;
     }
 
@@ -1170,8 +1217,6 @@ static void authorizeCurrentLink(unsigned long now) {
     applicationAuthorized = true;
     pairingLockState = PairingLockState::OwnerAuthorized;
     connectedSinceMs = now;
-    bleLinkSettleStartMs = now;
-    bleLinkSettleActive = true;
     connectionHapticPending = BLE_CONNECTION_HAPTIC_ENABLED != 0;
     connectionHapticPlayed = false;
     forceTelemetrySync = true;
@@ -1229,6 +1274,7 @@ static void finalizePairingUnlock(unsigned long now) {
     const unsigned long previousWindowStart = pairingWindowStartedMs;
     const bool preserveWindow = preservePairingWindowOnCleanup;
     const bool reusePreviousWindow = preserveWindow && previousWindowStart != 0UL;
+    const bool closeAfterCleanup = closePairingWindowAfterCleanup;
 
     stopPairingAdvertising();
     clearControllerPeerFilters();
@@ -1249,6 +1295,15 @@ static void finalizePairingUnlock(unsigned long now) {
     pendingSecuredEvent = false;
     pendingAuthEvent = false;
     preservePairingWindowOnCleanup = false;
+    closePairingWindowAfterCleanup = false;
+
+    if (closeAfterCleanup) {
+        pairingWindowStartedMs = 0UL;
+        pairingLockState = PairingLockState::NoOwnerClosed;
+        turnRgbLedOff();
+        rtt.println("[BLE LOCK] pairing window closed on mode change");
+        return;
+    }
 
     // A failed enrollment attempt must not extend the physical-access window.
     // A fresh button unlock gets a new full window; cleanup after a failed
@@ -1280,6 +1335,7 @@ static void abandonOwnerClaim(unsigned long now, const char* reason) {
     claimLinkSecured = false;
     claimStartedMs = now;
     preservePairingWindowOnCleanup = true;
+    closePairingWindowAfterCleanup = false;
 
     if (connected && currentConnHandle != BLE_CONN_HANDLE_INVALID) {
         Bluefruit.disconnect(currentConnHandle);
@@ -1289,6 +1345,27 @@ static void abandonOwnerClaim(unsigned long now, const char* reason) {
 }
 
 static void processPairingLock(unsigned long now) {
+    if (pendingPairingWindowClose) {
+        pendingPairingWindowClose = false;
+        if (pairingLockState == PairingLockState::PairingOpen ||
+            pairingLockState == PairingLockState::ClaimCommitting) {
+            stopPairingAdvertising();
+            pairingWindowStartedMs = 0UL;
+            pairingLockState = PairingLockState::Revoking;
+            pendingUnlockFinalize = true;
+            preservePairingWindowOnCleanup = false;
+            closePairingWindowAfterCleanup = true;
+            applicationAuthorized = false;
+            turnRgbLedOff();
+
+            if (connected && currentConnHandle != BLE_CONN_HANDLE_INVALID) {
+                Bluefruit.disconnect(currentConnHandle);
+                return;
+            }
+            finalizePairingUnlock(now);
+        }
+    }
+
     if (pendingUnauthorizedDisconnect) {
         pendingUnauthorizedDisconnect = false;
         applicationAuthorized = false;
@@ -1414,6 +1491,61 @@ static void processPairingLock(unsigned long now) {
         pendingAdvertisingRestart = false;
         startAdvertising();
     }
+}
+
+static bool processRemoteUnpair(unsigned long now) {
+    const RemoteUnpairState state = remoteUnpairState;
+    if (state == RemoteUnpairState::Idle) {
+        return false;
+    }
+
+    if (state == RemoteUnpairState::AckPending) {
+        // Revalidate in the main task before accepting the destructive action.
+        // RX is already owner-gated, but this also handles a link/state change
+        // between the BLE callback and this loop iteration.
+        const bool verifiedOwner =
+            connected && applicationAuthorized && ownerRecordValid &&
+            connectedPeerMatchesOwner &&
+            pairingLockState == PairingLockState::OwnerAuthorized;
+        if (!verifiedOwner) {
+            remoteUnpairState = RemoteUnpairState::Idle;
+            remoteUnpairSeq = 0u;
+            remoteUnpairQueuedMs = 0UL;
+            rtt.println("[BLE LOCK] remote unlock canceled before ACK");
+            return false;
+        }
+
+        if ((uint32_t)(now - remoteUnpairQueuedMs) >=
+            REMOTE_UNPAIR_ACK_TIMEOUT_MS) {
+            remoteUnpairState = RemoteUnpairState::Idle;
+            remoteUnpairSeq = 0u;
+            remoteUnpairQueuedMs = 0UL;
+            rtt.println("[BLE LOCK] remote unlock canceled: ACK timeout");
+            return false;
+        }
+
+        const uint32_t seq = remoteUnpairSeq;
+        if (sendCommandAck(seq, "UNPAIR", true)) {
+            remoteUnpairAckSentMs = now;
+            remoteUnpairQueuedMs = 0UL;
+            remoteUnpairState = RemoteUnpairState::AckSentWaiting;
+            rtt.printf("[BLE LOCK] remote unlock ACK sent seq=%lu\n",
+                       (unsigned long)seq);
+        }
+        return true;
+    }
+
+    if ((uint32_t)(now - remoteUnpairAckSentMs) <
+        REMOTE_UNPAIR_DISCONNECT_DELAY_MS) {
+        return true;
+    }
+
+    remoteUnpairState = RemoteUnpairState::Idle;
+    remoteUnpairSeq = 0u;
+    remoteUnpairQueuedMs = 0UL;
+    remoteUnpairAckSentMs = 0UL;
+    beginPairingUnlock("remote");
+    return true;
 }
 
 static bool applyMode(const String &valueRaw) {
@@ -2190,6 +2322,18 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
         cmd.toUpperCase();
         bool ok = false;
         const char* error = nullptr;
+        bool deferAck = false;
+
+        // Once an accepted UNPAIR is waiting for its ACK/disconnect, freeze
+        // application command handling so another operation cannot race the
+        // ownership teardown.
+        if (remoteUnpairState != RemoteUnpairState::Idle) {
+            if (hasSeq) {
+                sendCommandAck(seq, hasCmd ? cmd.c_str() : "UNKNOWN", false,
+                               "UNPAIR_PENDING");
+            }
+            return;
+        }
 
         if (hasCmd) {
             if (cmd == "GET_CALIBRATION_PROFILE") {
@@ -2316,6 +2460,28 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                     // logEvent("BLE", "cmd_enter_dfu");
                 }
                 ok = true;
+            } else if (cmd == "UNPAIR") {
+                const bool verifiedOwner =
+                    pairingLockState == PairingLockState::OwnerAuthorized &&
+                    ownerRecordValid && connectedPeerMatchesOwner &&
+                    applicationAuthorized;
+                const bool busy = isCalibrating() || pendingDfuEnter;
+
+                if (!hasSeq) {
+                    error = "BAD_REQUEST";
+                } else if (!verifiedOwner) {
+                    error = "NOT_OWNER";
+                } else if (busy || remoteUnpairState != RemoteUnpairState::Idle) {
+                    error = "BUSY";
+                } else {
+                    remoteUnpairSeq = seq;
+                    remoteUnpairQueuedMs = millis();
+                    remoteUnpairState = RemoteUnpairState::AckPending;
+                    deferAck = true;
+                    ok = true;
+                    rtt.printf("[BLE LOCK] remote unlock queued seq=%lu\n",
+                               (unsigned long)seq);
+                }
             } else if (cmd == "FACTORY_RESET") {
                 pendingFactoryReset = true;
                 ok = true;
@@ -2344,7 +2510,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 error = "UNKNOWN_CMD";
             }
 
-            if (hasSeq) {
+            if (hasSeq && !deferAck) {
                 sendCommandAck(seq, cmd.c_str(), ok, error);
             }
         }
@@ -2516,11 +2682,10 @@ void bluetoothSetup() {
         // Custom advertising below owns disconnect restarts because it must
         // select either an open policy or the controller owner whitelist.
         Bluefruit.Advertising.restartOnDisconnect(false);
-        rtt.printf("[BLEL] %lu CFG dl=%u phy=%u hold=%lu sup=%lu haptic=%u ppcp=%u\n",
+        rtt.printf("[BLEL] %lu CFG dl=%u phy=%u cccd_gate=1 sup=%lu haptic=%u ppcp=%u\n",
                    millis(),
                    (unsigned)BLE_REQUEST_DATA_LENGTH_ON_CONNECT,
                    (unsigned)BLE_REQUEST_PHY_ON_CONNECT,
-                   (unsigned long)BLE_LINK_SETTLE_MS,
                    (unsigned long)BLE_PREFERRED_SUPERVISION_TIMEOUT_MS,
                    (unsigned)BLE_CONNECTION_HAPTIC_ENABLED,
                    supervisionConfigured ? 1u : 0u);
@@ -2557,6 +2722,9 @@ void bluetoothLoop() {
 
     const unsigned long now = millis();
     processPairingLock(now);
+    if (processRemoteUnpair(now)) {
+        return;
+    }
     const bool appTxAllowed = bleApplicationTxAllowed(now);
 
     if (pendingProfileListSend && appTxAllowed) {
@@ -2827,16 +2995,17 @@ bool bluetoothPairingWindowIsOpen() {
            pairingLockState == PairingLockState::ClaimCommitting;
 }
 
-void bluetoothUnlockForPairing() {
-    // Called only from the physical Idle-mode double click.  First persist a
-    // revocation intent; if power is lost during the transition, boot sees
-    // that marker and removes the old bond instead of silently restoring it.
+static void beginPairingUnlock(const char* source) {
+    // Persist a revocation intent first; if power is lost during the
+    // transition, boot sees that marker and removes the old bond instead of
+    // silently restoring it. Both physical and remote release use this path.
     batteryBlinkActive = false;
     applicationAuthorized = false;
     connectionHapticPending = false;
     connectionHapticPlayed = false;
     connectedSinceMs = 0UL;
-    bleLinkSettleActive = false;
+    notificationsEnabled = false;
+    applicationTxReadyLogged = false;
     stopPairingAdvertising();
 
     if (ownerRecordValid) {
@@ -2852,7 +3021,9 @@ void bluetoothUnlockForPairing() {
     pairingLockState = PairingLockState::Revoking;
     pendingUnlockFinalize = true;
     preservePairingWindowOnCleanup = false;
-    rtt.println("[BLE LOCK] physical unlock requested");
+    closePairingWindowAfterCleanup = false;
+    rtt.printf("[BLE LOCK] %s unlock requested\n",
+               (source && source[0] != '\0') ? source : "owner");
 
     if (currentConnHandle != BLE_CONN_HANDLE_INVALID && Bluefruit.connected(currentConnHandle)) {
         Bluefruit.disconnect(currentConnHandle);
@@ -2862,6 +3033,14 @@ void bluetoothUnlockForPairing() {
     // No callback will arrive when already disconnected, so the main loop can
     // finish the bond deletion and open the timed enrollment window directly.
     finalizePairingUnlock(millis());
+}
+
+void bluetoothUnlockForPairing() {
+    beginPairingUnlock("physical");
+}
+
+void bluetoothClosePairingWindow() {
+    pendingPairingWindowClose = true;
 }
 
 void bluetoothRequestCalibrationStart() {

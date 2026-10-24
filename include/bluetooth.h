@@ -16,6 +16,8 @@ bool bluetoothIsConnected();
 bool bluetoothIsAuthorized();
 bool bluetoothPairingWindowIsOpen();
 void bluetoothUnlockForPairing();
+/** Safe from any caller: bluetoothLoop() closes an open enrollment window. */
+void bluetoothClosePairingWindow();
 
 /** Safe from BLE RX callback: only sets a deferred flag (see calibration). */
 void bluetoothRequestCalibrationStart();

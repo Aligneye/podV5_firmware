@@ -75,6 +75,12 @@ void setDeviceMode(Mode newMode) {
   lastModeChangeMs = millis();
   lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
+  // Enrollment is intentionally an Idle-only operation. Leaving Idle closes
+  // open advertising and stops the rapid red pairing indication.
+  if (currentMode != MODE_IDLE) {
+    bluetoothClosePairingWindow();
+  }
+
   // 3. Reset state flags
   if (currentMode == MODE_IDLE) {
     idlePrinted = false;

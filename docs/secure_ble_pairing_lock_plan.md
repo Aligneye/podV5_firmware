@@ -5,10 +5,9 @@
 This plan is now implemented in the firmware with the following concrete
 choices:
 
-- An Idle-mode double click revokes the current owner and opens a 120-second
-  pairing window.
-- An unowned pod is non-connectable until that physical action opens the
-  window.
+- An Idle-mode double click or an authorized owner `UNPAIR` command revokes
+  the current owner and opens a 120-second pairing window.
+- An unowned pod is non-connectable until either release path opens the window.
 - A successful encrypted bond is committed to `/ble_owner.dat` as a versioned,
   CRC-protected owner record tied to Bluefruit's stored bond.
 - Locked advertising uses the nRF52 SoftDevice device-identity list and
@@ -18,7 +17,8 @@ choices:
   requests before the raw application callback runs. The firmware therefore
   disconnects any locked-state pairing request immediately and never opens the
   application authorization gate. This also means an owner that deletes the
-  phone-side bond must use the physical unlock flow before pairing again.
+  phone-side bond must use the physical unlock flow before pairing again,
+  because it can no longer authorize the remote command.
 - Characteristic RX, notifications, telemetry, session sync, DFU commands,
   and factory-reset commands are inaccessible until the stored owner has
   restored an encrypted link.
@@ -143,7 +143,7 @@ OWNER_LOCKED
 OWNER_AUTHORIZED
 
 OWNER_LOCKED / OWNER_AUTHORIZED
-      | physical unlock
+      | physical unlock, or authorized UNPAIR from OWNER_AUTHORIZED
       v
 REVOKING ---- clear bond and whitelist ----> PAIRING_OPEN
 ```
@@ -393,7 +393,8 @@ Bluefruit saves bond keys using a deferred callback. The firmware must verify th
 
 ## Unlock and revocation procedure
 
-The chosen physical gesture should call one API:
+The physical gesture and the delayed post-ACK remote path should converge on
+one revocation API:
 
 ```cpp
 void pairingLockRequestUnlock();
@@ -479,7 +480,10 @@ This prevents a nearby phone from claiming ownership merely by winning the race 
 5. Enable notifications.
 6. Begin normal protocol communication.
 
-The app must not have a remote unlock command if physical access is intended to be the only way to change ownership.
+The app may send `UNPAIR` only over the current owner's authorized encrypted
+link. The firmware must ACK first, wait 300-500 ms, and then enter the same
+power-loss-safe revocation path as the physical gesture. Physical release
+remains necessary when the owner phone or its bond is unavailable.
 
 ### New-owner pairing
 

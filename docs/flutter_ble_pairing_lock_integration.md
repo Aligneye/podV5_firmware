@@ -27,7 +27,7 @@ by the pod as proof of ownership.
 | Pairing-window duration | 120 seconds |
 | Security timeout | 10 seconds |
 | Owner-commit timeout | 5 seconds |
-| Post-authorization settle period | Approximately 5 seconds |
+| Post-authorization readiness gate | Notification subscription; no fixed delay |
 
 Use UUID matching as the primary scan filter. The advertised name is useful as
 a human-readable hint, but names are not unique and must not be used as an
@@ -40,7 +40,8 @@ The pod has one of three externally relevant conditions:
 1. **Unowned and closed**: it does not advertise and cannot be paired until the
    user physically opens pairing.
 2. **Pairing open**: an Idle-mode double click opens a 120-second window. The
-   red LED blinks and one phone may establish a new encrypted bond.
+   red LED blinks and one phone may establish a new encrypted bond. Leaving
+   Idle closes the window immediately.
 3. **Owned and locked**: the pod advertises with a controller connection
    whitelist. Only the bonded owner's identity may connect.
 
@@ -119,14 +120,13 @@ It also sends an acknowledgement when `seq` was present:
 The current firmware normally sends `INFO` before `ACK`, so the app must not
 assume ACK always arrives first.
 
-The firmware intentionally holds application traffic for approximately five
-seconds after owner authorization while the BLE link settles. A command sent
-before authorization may be silently discarded even if the OS reports that
-the GATT write succeeded. Therefore:
+The firmware opens application traffic as soon as the owner is authorized and
+notifications are enabled. A command sent before authorization may be silently
+discarded even if the OS reports that the GATT write succeeded. Therefore:
 
 - subscribe to notifications first;
 - allow OS pairing/encryption to finish;
-- send `GET_DEVICE_INFO` after a short delay;
+- send `GET_DEVICE_INFO` as soon as notification subscription completes;
 - if no `INFO` or matching ACK arrives, retry only this safe probe about once
   per second; and
 - stop after a reasonable connection deadline, such as 15 seconds.
@@ -199,24 +199,41 @@ Use bounded reconnect backoff rather than a tight loop. For example, retry
 after 1, 2, 5, 10, and 30 seconds while the relevant screen is active. Stop
 automatic retries when the user is trying to release or transfer ownership.
 
-## Physical ownership release
+## Ownership release
 
-There is no BLE command for unlocking ownership. This is intentional.
+The verified owner may release the pod remotely. Send this only after
+notifications are subscribed and the owner connection is ready:
 
-When the user double-clicks the pod in Idle mode:
+```json
+{"seq":42,"cmd":"UNPAIR"}
+```
 
-1. The pod immediately stops authorizing the current connection.
-2. If connected, it disconnects the current owner.
-3. It records a power-loss-safe revocation intent.
-4. It deletes the old pod-side bond and owner record.
-5. It opens the 120-second pairing window and blinks red.
+The pod replies within three seconds:
 
-The app should treat an unexpected disconnect during a user-confirmed transfer
-flow as expected, stop auto-reconnecting, and return to the pairing screen.
+```json
+{"t":"ACK","seq":42,"cmd":"UNPAIR","ok":true}
+```
 
-If ownership is being transferred to another phone, the old app should mark
-the locally saved pod association as released. This local flag only controls
-the UI; the pod's physical unlock is what actually revokes ownership.
+After a successful ACK, the app must stop automatic reconnect attempts. The
+pod waits 400 ms so the notification can reach the app, disconnects, records
+and completes the power-loss-safe owner/bond revocation, then opens the
+120-second pairing window and blinks red. A request received during DFU or
+calibration is rejected with the same ACK shape and `ok:false`; ownership is
+unchanged.
+
+Only the currently authorized encrypted owner connection can execute `UNPAIR`.
+Writes from any other connection are ignored by the application authorization
+gate. The command requires `seq`; firmware does not revoke ownership unless it
+successfully queues the positive ACK notification.
+
+The Idle-mode double click remains as the recovery path when the owner phone is
+lost or cannot connect. It uses the same revocation and pairing-window flow,
+without requiring an app ACK.
+
+For either release path, the app should treat the resulting disconnect as
+expected, stop auto-reconnecting, return to the pairing screen, and mark its
+locally saved pod association as released. This local flag only controls the
+UI; the pod-side revocation is what removes ownership.
 
 ## Stale bond recovery
 
@@ -291,6 +308,9 @@ guided enrollment flow.
   command write and its ACK.
 - The firmware currently does not deduplicate commands by `seq`. Retrying a
   mutating command can execute it more than once.
+- Do not retry `UNPAIR` after receiving `ok:true`; the expected disconnect is
+  the completion signal. If no ACK arrives within three seconds, keep the pod
+  associated and show a retryable error.
 - A successful GATT write means the transport accepted bytes; it does not mean
   the pod authorized or executed the command.
 - Never send DFU, factory reset, calibration, therapy, or training commands
