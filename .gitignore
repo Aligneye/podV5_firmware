@@ -6,3 +6,6 @@
 .claude/
 private/
 bluetooth/
+
+# Temporary local Git metadata
+.git-offline-temp/

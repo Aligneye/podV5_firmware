@@ -105,8 +105,9 @@ Lines 89-112
 
 handleDoubleClick()
 Double click ka behavior current mode par depend karta hai:
-Training ya Idle Mode mein: Calibration start hoti hai. Training alert style change nahi hota.
+Training Mode mein: Calibration start hoti hai.
 Therapy Mode mein: Intensity level 1 -> 2 -> 3 cycle hota hai bina therapy session restart kiye.
+Idle Mode mein: Purana BLE owner revoke hota hai aur limited secure pairing window open hoti hai. Bond delete, whitelist aur owner-record ka actual kaam Bluetooth module karta hai; button module sirf physical unlock request bhejta hai.
 
 
 Lines 114-125

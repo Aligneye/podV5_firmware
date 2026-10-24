@@ -75,6 +75,12 @@ void setDeviceMode(Mode newMode) {
   lastModeChangeMs = millis();
   lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 
+  // Enrollment is intentionally an Idle-only operation. Leaving Idle closes
+  // open advertising and stops the rapid red pairing indication.
+  if (currentMode != MODE_IDLE) {
+    bluetoothClosePairingWindow();
+  }
+
   // 3. Reset state flags
   if (currentMode == MODE_IDLE) {
     idlePrinted = false;
@@ -133,7 +139,10 @@ static void handleDoubleClick() {
     break;
 
   case MODE_IDLE:
-    // Reserved for future BLE pairing unlock.
+    // Ownership changes require physical access.  Bluetooth owns the actual
+    // revoke/open-window state machine; the button layer only requests it.
+    DEBUG_PRINTLN("Opening BLE pairing window from IDLE mode");
+    bluetoothUnlockForPairing();
     break;
 
   default:
