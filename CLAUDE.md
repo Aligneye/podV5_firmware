@@ -38,9 +38,11 @@ Flashing uses a custom script (`upload_hooks.py`) that invokes OpenOCD with CMSI
 
 **Motor priority layers** (`src/motor.cpp`): base duty (therapy/training) is overridden by temporary feedback pulses (calibration success/fail), which are in turn overridden by calm haptic fade. `motorUpdate()` applies the highest-priority active layer each loop.
 
-**Storage** (`src/storage.cpp`): LittleFS on internal nRF52 flash. Settings page is 4KB at `0x73000` with CRC validation. All file writes use an atomic temp-file pattern to prevent brownout corruption. Flash files: `/sessions.dat`, `/profiles.dat`, `/devtime.dat`, `/sess_ev.dat`.
+**Storage** (`src/storage.cpp`): LittleFS on internal nRF52 flash (28 KB at `0x6D000`, shared by all files). Settings persist via the filesystem with CRC validation. File rewrites use an atomic temp-file pattern to prevent brownout corruption. Flash files include `/sess_v2.log`, `/sess.st`, `/profiles.dat`, `/devtime.dat`.
 
-**Session lifecycle** (`src/session_stats.cpp`): Training and therapy sessions run concurrently with independent event buffers. Sessions are only promoted (counted) after 30 seconds of activity to filter noise. Up to 120 sessions persisted via `session_log.cpp`.
+**Session lifecycle** (`src/session_stats.cpp`): Training and therapy sessions run concurrently with independent event buffers. Sessions are only promoted (counted) after 30 seconds of activity to filter noise. At session end a self-contained `SessionRecord` (session id, type, start time, slouch periods or therapy patterns, totals) is built and handed to `session_log.cpp`.
+
+**Session log** (`src/session_log.cpp`): append-only `/sess_v2.log` of CRC-checked records (`SREC` header … `SEND` footer with the session id) plus `SACK` sent markers. Writes are deferred ~400 ms from the main loop; RAM holds only an index. Capped at 120 records / 8 KB (oldest sent evicted first); compacted via temp file after a sync or when the file exceeds 9 KB. Legacy `/sessions.log` + `/sess_ev.dat` are migrated once at boot. Format and BLE sync protocol (`SESS_AVAIL`, `S_HDR`/`S_EV`/`S_END`): `docs/session_sync_v2.md`.
 
 **BLE** (`src/bluetooth.cpp`): Single bidirectional characteristic (`beb5483e-...`) carries all communication with the mobile app — live telemetry (500ms interval), therapy plans, calibration results, and battery status. No separate characteristics per data type.
 

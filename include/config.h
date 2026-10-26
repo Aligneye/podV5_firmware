@@ -96,7 +96,7 @@
 #define SYNC_MAX_WINDOW          40
 // Refuse to stream below this ATT MTU: sync packets are sized to fit a
 // single notification so a failed notify() can be retried atomically.
-// 140 = smallest 4-pair SEV chunk (~137 B payload) + 3 B ATT header.
+// 140 = smallest 4-pair S_EV chunk (~137 B payload) + 3 B ATT header.
 #define SYNC_MIN_MTU             140
 #define SYNC_ACK_TIMEOUT_MS      10000UL
 // Connection interval requests in 1.25 ms units (phone may decline).

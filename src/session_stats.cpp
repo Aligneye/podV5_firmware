@@ -7,6 +7,7 @@
 #include "rtt_debugger.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include <RTTStream.h>
 
 extern RTTStream rtt;
@@ -103,6 +104,29 @@ static uint16_t clampToU16(unsigned long secs) {
     return (uint16_t)secs;
 }
 
+// Built at session end and handed to session_log (static: ~400 B).
+static SessionRecord s_record;
+
+static void bumpNextIdAboveLog();
+
+// Reserve identity at start so live packets and the final record always match.
+// Discarded short sessions still consume an id.
+static uint32_t claimSessionId() {
+    bumpNextIdAboveLog();
+    uint32_t id = state.nextSessionId;
+    if (trainingActive && trainingCurrentId >= id) id = trainingCurrentId + 1u;
+    if (therapyActive && therapyCurrentId >= id) id = therapyCurrentId + 1u;
+    state.nextSessionId = id + 1u;
+    return id;
+}
+
+// Keeps new ids above every id still in the log (e.g. after migration or a
+// counter reset).
+static void bumpNextIdAboveLog() {
+    const uint32_t maxStored = session_log_max_id();
+    if (state.nextSessionId <= maxStored) state.nextSessionId = maxStored + 1u;
+}
+
 #if SESSION_HAS_FS
 static bool writeStateAtomic() {
     InternalFS.remove(STATE_TMP_PATH);
@@ -156,6 +180,9 @@ void initSessionStats() {
     if (!stateLoaded) {
         loadState();
         stateLoaded = true;
+        const uint32_t before = state.nextSessionId;
+        bumpNextIdAboveLog();
+        if (state.nextSessionId != before) saveState();
     }
     trainingActive         = false;
     trainingPromoted       = false;
@@ -184,7 +211,8 @@ void onTrainingStarted() {
     trainingEnteredMs     = millis();
     trainingStartTicks    = getDeviceTicks();
     trainingSubMode       = trainingDelayToSubMode(currentTrainingDelay);
-    trainingCurrentId     = state.nextSessionId;
+    trainingCurrentId     = claimSessionId();
+    saveState();
     slouchCount           = 0;
     correctionCount       = 0;
     eventBufferOverflowed = false;
@@ -205,76 +233,71 @@ static void finalizeTrainingRecord() {
         startEpoch = ticksToEpoch(trainingStartTicks);
     }
 
+    const uint32_t sessionId = trainingCurrentId;
     state.trainingSessionCount++;
-    if (state.nextSessionId == trainingCurrentId) state.nextSessionId++;
     state.lastTrainingStartEpoch = startEpoch;
     state.lastTrainingEndEpoch   = getDeviceTime();
     saveState();
 
-    uint32_t wrongDur = 0;
-    uint16_t pairCount = correctionCount < slouchCount ? correctionCount : slouchCount;
-    for (uint16_t i = 0; i < pairCount; i++) {
-        if (correctionBuf[i] > slouchBuf[i]) {
-            wrongDur += (uint32_t)(correctionBuf[i] - slouchBuf[i]);
-        }
-    }
-    if (slouchCount > correctionCount) {
-        uint16_t lastSlouch = slouchBuf[slouchCount - 1];
-        if (durationSec > lastSlouch) {
-            wrongDur += (durationSec - lastSlouch);
-        }
+    // Slouch periods alternate slouch[i] -> correction[i]; one still open
+    // at the end lasts until the session ended.
+    SessionRecord& rec = s_record;
+    memset(&rec, 0, sizeof(rec));
+    rec.type       = SESSION_TYPE_POSTURE;
+    rec.session_id = sessionId;
+    rec.start_ts   = startEpoch;
+    rec.total_sec  = clampToU16(durationSec);
+    if (startEpoch != 0 && getDeviceTimeStatus() == TIME_FRESH) {
+        rec.flags |= SREC_FLAG_TIME_SYNCED;
     }
 
-    {
-        StoredSession rec{};
-        rec.type             = SESSION_TYPE_POSTURE;
-        rec.start_ts         = startEpoch;
-        rec.ts_synced        = (startEpoch != 0 && getDeviceTimeStatus() == TIME_FRESH);
-        rec.duration_sec     = clampToU16(durationSec);
-        rec.wrong_count      = slouchCount;
-        rec.wrong_dur_sec    = clampToU16(wrongDur);
-        rec.therapy_pattern  = 0;
-        rec.sent             = false;
-        session_log_append(rec);
-
-        session_log_write_training_events(
-            startEpoch, slouchBuf, correctionBuf,
-            slouchCount, correctionCount);
-        notifyNewSessionStored();
+    uint32_t badSec = 0;
+    for (uint16_t i = 0; i < slouchCount; i++) {
+        const uint32_t start = slouchBuf[i];
+        const uint32_t end   = (i < correctionCount) ? correctionBuf[i] : durationSec;
+        const uint32_t dur   = end > start ? end - start : 0u;
+        badSec += dur;
+        if (rec.event_count < MAX_STORED_EVENTS) {
+            SessionEvent& ev = rec.events[rec.event_count++];
+            ev.start_off = (uint16_t)start;
+            ev.dur       = clampToU16(dur);
+        }
     }
+    if (badSec > durationSec) badSec = durationSec;
+    rec.slouch_count = slouchCount;
+    rec.bad_sec      = clampToU16(badSec);
+    rec.good_sec     = clampToU16(durationSec - badSec);
+    if (eventBufferOverflowed || slouchCount > rec.event_count) {
+        rec.flags |= SREC_FLAG_EVENTS_TRUNCATED;
+    }
+
+    const bool stored = session_log_append(rec);
+    if (stored) notifyNewSessionStored(sessionId, SESSION_TYPE_POSTURE);
 
     char stampBuf[24];
     formatEpochUTC(startEpoch, stampBuf, sizeof(stampBuf));
     rtt.println("========================================");
-    rtt.println("  TRAINING SESSION SAVED               ");
-    serialPrintf ("  ID      : #%lu\n", (unsigned long)trainingCurrentId);
+    rtt.println(stored ? "  TRAINING SESSION SAVED               "
+                       : "  TRAINING SESSION NOT STORED (queue full)");
+    serialPrintf ("  ID      : #%lu\n", (unsigned long)sessionId);
     serialPrintf ("  Start   : %s UTC\n", stampBuf);
-    serialPrintf ("  Dur     : %lu s\n", (unsigned long)durationSec);
-    serialPrintf ("  Slouches: %u  Corrections: %u%s\n",
-                  (unsigned)slouchCount, (unsigned)correctionCount,
-                  eventBufferOverflowed ? " (truncated)" : "");
+    serialPrintf ("  Dur     : %u s  (good %u s / bad %u s)\n",
+                  (unsigned)rec.total_sec, (unsigned)rec.good_sec, (unsigned)rec.bad_sec);
+    serialPrintf ("  Slouches: %u%s\n", (unsigned)rec.slouch_count,
+                  (rec.flags & SREC_FLAG_EVENTS_TRUNCATED) ? " (events truncated)" : "");
 
     {
         const uint16_t printLimit = 16;
-        uint16_t printed = 0;
-        for (uint16_t i = 0; i < slouchCount && printed < printLimit; i++, printed++) {
-            uint16_t s = slouchBuf[i];
-            serialPrintf("  Event %u: Slouched at %um %02us",
+        for (uint16_t i = 0; i < rec.event_count && i < printLimit; i++) {
+            const SessionEvent& ev = rec.events[i];
+            serialPrintf("  Slouch %u: at %um %02us for %us\n",
                          (unsigned)(i + 1),
-                         (unsigned)(s / 60), (unsigned)(s % 60));
-            if (i < correctionCount) {
-                uint16_t c = correctionBuf[i];
-                serialPrintf(" -> Corrected at %um %02us (held %us)",
-                             (unsigned)(c / 60), (unsigned)(c % 60),
-                             (unsigned)(c > s ? (c - s) : 0));
-            } else {
-                rtt.print(" -> not corrected");
-            }
-            rtt.println();
+                         (unsigned)(ev.start_off / 60), (unsigned)(ev.start_off % 60),
+                         (unsigned)ev.dur);
         }
-        if (slouchCount > printLimit) {
+        if (rec.event_count > printLimit) {
             serialPrintf("  ... (%u more events not printed)\n",
-                         (unsigned)(slouchCount - printLimit));
+                         (unsigned)(rec.event_count - printLimit));
         }
     }
 
@@ -311,7 +334,8 @@ void onTherapyStarted() {
     therapyEnteredMs   = millis();
     therapyStartTicks  = getDeviceTicks();
     therapySubMode     = (uint8_t)(therapyDuration / 60000UL);
-    therapyCurrentId   = state.nextSessionId;
+    therapyCurrentId   = claimSessionId();
+    saveState();
     serialPrintf("SESSION: Therapy entered (pending id=%lu, subMode=%u min)\n",
                  (unsigned long)therapyCurrentId, (unsigned)therapySubMode);
 }
@@ -331,66 +355,49 @@ static void finalizeTherapyRecord() {
     uint16_t uniquePatterns = getTherapyUniquePatternCount();
     uint16_t totalPatterns  = getTherapyTotalPatternCount();
 
+    const uint32_t sessionId = therapyCurrentId;
     state.therapySessionCount++;
-    if (state.nextSessionId == therapyCurrentId) state.nextSessionId++;
     state.lastTherapyStartEpoch = startEpoch;
     state.lastTherapyEndEpoch   = getDeviceTime();
     saveState();
 
-    int patternIdx = currentPatternIndex;
-    if (patternIdx < 0) patternIdx = 0;
-    if (patternIdx > 255) patternIdx = 255;
-
-    {
-        StoredSession rec{};
-        rec.type             = SESSION_TYPE_THERAPY;
-        rec.start_ts         = startEpoch;
-        rec.ts_synced        = (startEpoch != 0 && getDeviceTimeStatus() == TIME_FRESH);
-        rec.duration_sec     = clampToU16(durationSec);
-        rec.wrong_count      = 0;
-        rec.wrong_dur_sec    = 0;
-        rec.therapy_pattern  = (uint8_t)patternIdx;
-        rec.sent             = false;
-        session_log_append(rec);
-
-        uint8_t seqBuf[MAX_THERAPY_PATTERNS];
-        int seqLen = getTherapyPatternSequence(seqBuf, MAX_THERAPY_PATTERNS);
-        if (seqLen > 0) {
-            session_log_write_therapy_events(
-                startEpoch, seqBuf, (uint8_t)seqLen);
-        }
-        notifyNewSessionStored();
+    SessionRecord& rec = s_record;
+    memset(&rec, 0, sizeof(rec));
+    rec.type       = SESSION_TYPE_THERAPY;
+    rec.session_id = sessionId;
+    rec.start_ts   = startEpoch;
+    rec.total_sec  = clampToU16(durationSec);
+    if (startEpoch != 0 && getDeviceTimeStatus() == TIME_FRESH) {
+        rec.flags |= SREC_FLAG_TIME_SYNCED;
     }
+
+    uint8_t seqBuf[MAX_THERAPY_PATTERNS];
+    int seqLen = getTherapyPatternSequence(seqBuf, MAX_THERAPY_PATTERNS);
+    if (seqLen < 0) seqLen = 0;
+    session_record_fill_therapy(rec, seqBuf, (uint8_t)seqLen,
+                                (uint16_t)(THERAPY_PATTERN_MS / 1000UL));
+
+    const bool stored = session_log_append(rec);
+    if (stored) notifyNewSessionStored(sessionId, SESSION_TYPE_THERAPY);
 
     char stampBuf[24];
     formatEpochUTC(startEpoch, stampBuf, sizeof(stampBuf));
     rtt.println("========================================");
-    rtt.println("  THERAPY SESSION SAVED                ");
-    serialPrintf ("  ID       : #%lu\n", (unsigned long)therapyCurrentId);
+    rtt.println(stored ? "  THERAPY SESSION SAVED                "
+                       : "  THERAPY SESSION NOT STORED (queue full)");
+    serialPrintf ("  ID       : #%lu\n", (unsigned long)sessionId);
     serialPrintf ("  Start    : %s UTC\n", stampBuf);
-    serialPrintf ("  Dur      : %lu s\n", (unsigned long)durationSec);
+    serialPrintf ("  Dur      : %u s\n", (unsigned)rec.total_sec);
     serialPrintf ("  Duration : %u min\n", (unsigned)therapySubMode);
     serialPrintf ("  Patterns : %u unique / %u total\n",
                   (unsigned)uniquePatterns, (unsigned)totalPatterns);
 
-    {
-        uint8_t printSeq[MAX_THERAPY_PATTERNS];
-        int printLen = getTherapyPatternSequence(printSeq, MAX_THERAPY_PATTERNS);
-        if (printLen > 0) {
-            for (int i = 0; i < printLen; i++) {
-                uint32_t patDur = (uint32_t)(THERAPY_PATTERN_MS/1000UL);
-                if (i == printLen - 1) {
-                    uint32_t consumed = (uint32_t)(THERAPY_PATTERN_MS / 1000UL) * (uint32_t)(printLen - 1);
-                    patDur = (durationSec > consumed) ? (durationSec - consumed) : 0u;
-                    if (patDur == 0u) patDur = (uint32_t)(durationSec % 60u);
-                    if (patDur == 0u) patDur = 60u;
-                }
-                serialPrintf("  Pattern %d: %-18s (%lus)\n",
-                             i + 1,
-                             getPatternNameByIndex((int)printSeq[i]),
-                             (unsigned long)patDur);
-            }
-        }
+    for (uint16_t i = 0; i < rec.event_count; i++) {
+        const SessionEvent& ev = rec.events[i];
+        serialPrintf("  Pattern %u: %-18s at %us for %us\n",
+                     (unsigned)(i + 1),
+                     getPatternNameByIndex((int)ev.pattern),
+                     (unsigned)ev.start_off, (unsigned)ev.dur);
     }
 
     serialPrintf ("  Total stored sessions: %lu\n",
@@ -557,6 +564,7 @@ void resetAllSessionCounters() {
     state.lastTrainingEndEpoch   = 0u;
     state.lastTherapyStartEpoch  = 0u;
     state.lastTherapyEndEpoch    = 0u;
+    bumpNextIdAboveLog();
     saveState();
 
     slouchCount           = 0;
