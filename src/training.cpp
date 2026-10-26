@@ -190,7 +190,6 @@ void trainingGetFilteredAccel(float *outY, float *outZ) {
 }
 
 // Session stats (training mode)
-static Mode s_lastModeForSession = MODE_IDLE;
 
 #if ALIGN_RTT_SENSOR_LOG
 static unsigned long s_lastSensorRttMs = 0;
@@ -646,19 +645,19 @@ void trainingLoop() {
 
   bool sampleReady = false;
   if (currentMode == MODE_TRAINING) {
-    if (s_lastModeForSession != MODE_TRAINING) {
+    // Idle skips trainingLoop(), and setDeviceMode() stops the session
+    // directly. Use the recorder's state so re-entry always starts a new one.
+    if (!isTrainingActive()) {
       wakePostureSensor();
       trainingStart();
-      s_lastModeForSession = MODE_TRAINING;
     }
     sampleReady = updatePostureAngle();
     applyTrainingMotorFeedback(now);
     logTrainingSensorRtt(now);
   } else {
-    if (s_lastModeForSession == MODE_TRAINING) {
+    if (isTrainingActive()) {
       trainingStop();
     }
-    s_lastModeForSession = currentMode;
 
     if (sensorInitialized) {
       sampleReady = trainingIngestAccelSample();
