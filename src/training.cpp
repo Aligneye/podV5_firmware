@@ -37,6 +37,7 @@ static constexpr float kMotionThreshold = 2.0f;
 static constexpr float kDirectionDeg = 20.0f;
 float kBadPostureDeg = 30.0f;
 uint32_t trainingDelayedAlertMs = 5000UL;
+uint8_t trainingIntensity = TRAINING_DEFAULT_INTENSITY;
 static constexpr float kAngleClampDeg = 90.0f;
 static constexpr float kDefaultOriginY = 6.75f;
 static constexpr float kDefaultOriginZ = 6.75f;
@@ -509,7 +510,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     trainingSubModeIndex = TrainingAlertStyle::Instant;
   }
 
-  if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
+  if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts || trainingIntensity == 0u) {
     motorSetDuty(0);
     s_badMotorStartMs = 0;
     isTrainingMotorAlertActive = false;
@@ -542,7 +543,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_vibToggleMs = now;
     s_vibOn = !s_vibOn;
   }
-  motorSetDuty(s_vibOn ? VIB_INTENSITY_MAX : 0);
+  motorSetDuty(s_vibOn ? trainingIntensity : 0);
 }
 
 void sleepPostureSensor() {

@@ -494,7 +494,7 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
     updatePostureAngle();
     const bool badNow = (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg);
 
-    char telemetryBuffer[288];
+    char telemetryBuffer[304];
     snprintf(
       telemetryBuffer,
       sizeof(telemetryBuffer),
@@ -503,6 +503,7 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
       "\"difficulty_angle\":%.0f,"
       "\"posture\":\"%s\","
       "\"delay_ms\":%lu,"
+      "\"intensity\":%u,"
       "\"alert_active\":%s,"
       "\"profile_id\":%lu,\"profile\":\"%s\"}",
       "TRAINING",
@@ -512,6 +513,7 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
       kBadPostureDeg,
       badNow ? "BAD POSTURE" : "GOOD POSTURE",
       (unsigned long)trainingDelayedAlertMs,
+      (unsigned)trainingIntensity,
       isTrainingMotorAlertActive ? "true" : "false",
       (unsigned long)profileId,
       profileName
@@ -1620,6 +1622,29 @@ static bool parseTrainingSubMode(const String& valueRaw, TrainingAlertStyle& out
 static bool extractJsonStringField(const String& payload, const char* key, String& out);
 static bool extractJsonIntField(const String& payload, const char* key, uint32_t& out);
 
+// Optional for older apps. Parse directly without allocating a numeric String,
+// and reject fractions, negatives and overflow instead of truncating to PWM.
+static bool extractTrainingIntensity(const String& payload, uint8_t& intensity) {
+    intensity = TRAINING_DEFAULT_INTENSITY;
+    const char* field = strstr(payload.c_str(), "\"intensity\"");
+    if (!field) return true;
+    const char* p = field + sizeof("\"intensity\"") - 1u;
+    while (isspace((unsigned char)*p)) ++p;
+    if (*p++ != ':') return false;
+    while (isspace((unsigned char)*p)) ++p;
+    if (!isdigit((unsigned char)*p)) return false;
+    if (*p == '0' && isdigit((unsigned char)p[1])) return false;
+    unsigned value = 0u;
+    do {
+        value = value * 10u + (unsigned)(*p++ - '0');
+        if (value > 255u) return false;
+    } while (isdigit((unsigned char)*p));
+    while (isspace((unsigned char)*p)) ++p;
+    if (*p != ',' && *p != '}') return false;
+    intensity = (uint8_t)value;
+    return true;
+}
+
 static bool extractTrainingStartFields(const String& payload,
                                        TrainingAlertStyle& subMode,
                                        uint32_t& difficultyAngle,
@@ -1662,6 +1687,7 @@ static bool extractTrainingStartFields(const String& payload,
 static bool startTrainingFromBle(TrainingAlertStyle subMode,
                                  uint32_t difficultyAngle,
                                  uint32_t delayMs,
+                                 uint8_t intensity,
                                  const char*& error) {
     if (isCalibrating()) {
         error = "CALIBRATING";
@@ -1671,6 +1697,7 @@ static bool startTrainingFromBle(TrainingAlertStyle subMode,
     trainingSubModeIndex = subMode;
     kBadPostureDeg = (float)difficultyAngle;
     trainingDelayedAlertMs = delayMs;
+    trainingIntensity = intensity;
     deviceOn = true;
     setDeviceMode(MODE_TRAINING);
     markSubModeChanged();
@@ -2379,8 +2406,13 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 TrainingAlertStyle subMode = TrainingAlertStyle::Instant;
                 uint32_t difficultyAngle = 0u;
                 uint32_t delayMs = 0u;
+                uint8_t intensity = TRAINING_DEFAULT_INTENSITY;
                 if (extractTrainingStartFields(payload, subMode, difficultyAngle, delayMs, error)) {
-                    ok = startTrainingFromBle(subMode, difficultyAngle, delayMs, error);
+                    if (!extractTrainingIntensity(payload, intensity)) {
+                        error = "BAD_INTENSITY";
+                    } else {
+                        ok = startTrainingFromBle(subMode, difficultyAngle, delayMs, intensity, error);
+                    }
                 }
             } else if (cmd == "SET_MODE") {
                 String mode;

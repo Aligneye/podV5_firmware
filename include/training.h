@@ -38,6 +38,9 @@ extern bool  isBadPosture;
 extern bool  sensorInitialized;
 extern float kBadPostureDeg;
 extern uint32_t trainingDelayedAlertMs;
+// Raw alert PWM (0 = muted, 255 = full duty); independent of therapy levels.
+constexpr uint8_t TRAINING_DEFAULT_INTENSITY = 140;
+extern uint8_t trainingIntensity;
 extern bool  s_bootProfileDetectionDone;
 
 /** Short text for RTT / BLE (no Arduino String). */
