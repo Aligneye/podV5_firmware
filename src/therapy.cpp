@@ -276,6 +276,9 @@ void therapyEnsurePatternsInitialized() {
 }
 
 void therapyStart() {
+    // Repeated start commands may update intensity during the same session.
+    if (therapyState == THERAPY_RUNNING) return;
+
     therapySessionId++;
     if (therapySessionId == 0) {
         therapySessionId = 1;

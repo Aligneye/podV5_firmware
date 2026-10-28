@@ -30,8 +30,9 @@ void therapySetup();
 void therapyLoop();
 void therapyEnsurePatternsInitialized();
 
+/** Starts therapy if stopped; preserves the active session if already running. */
 void therapyStart();
-/** Stops motor + therapy state. If returnToIdle is false, leaves currentMode unchanged (e.g. sub-mode restart). */
+/** Stops motor + therapy state. If returnToIdle is false, leaves currentMode unchanged (e.g. mode transition). */
 void therapyStop(bool returnToIdle = true);
 
 bool therapyIsRunning();

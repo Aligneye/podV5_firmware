@@ -114,7 +114,7 @@ static void syncReset();
 static void onBleRawEvent(ble_evt_t* evt);
 static void onBleCccdWrite(uint16_t conn_handle, BLECharacteristic* chr, uint16_t value);
 
-static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 500UL;
+static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 150UL;
 static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t STATUS_PACKET_INTERVAL_MS = 5000UL;
@@ -1710,11 +1710,6 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
         error = "CALIBRATING";
         return false;
     }
-    if (therapyIsRunning()) {
-        error = "ALREADY_RUNNING";
-        return false;
-    }
-
     // Keep accepting the legacy duration choices so existing app versions can
     // start therapy; the therapy engine always applies the fixed 20 minutes.
     if (durationMin != 10 && durationMin != 20 && durationMin != 30) {
@@ -1732,7 +1727,9 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
 
     deviceOn = true;
     setDeviceMode(MODE_THERAPY);
-    markSubModeChanged();
+    // An active session keeps its ID, timer, and pattern position. The motor
+    // reads therapyIntensityLevel on its next update.
+    therapyStart();
     bluetoothNotifyStateChanged();
     return true;
 }
@@ -2487,22 +2484,6 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             } else if (cmd == "GET_THERAPY_PLAN") {
                 sendTherapyPlanPacket();
                 ok = true;
-            } else if (cmd == "THERAPY_START") {
-                uint32_t duration = 0;
-                uint32_t intensity = 0;
-                bool hasDuration = extractJsonIntField(payload, "therapy_duration", duration);
-                bool hasIntensity = extractJsonIntField(payload, "therapy_intensity", intensity);
-                if (hasDuration && hasIntensity) {
-                    if ((duration == 10 || duration == 20 || duration == 30) && (intensity >= 1 && intensity <= 3)) {
-                        // Duration is fixed in firmware; accept legacy app values
-                        // but always run a 20-minute session.
-                        therapySubModeIndex = 1;
-                        therapyIntensityLevel = (int)intensity;
-                        setDeviceMode(MODE_THERAPY);
-                        therapyStart();
-                        ok = true;
-                    }
-                }
             } else if (cmd == "TRAINING_STOP") {
                 ok = trainingtop();
             } else if (cmd == "THERAPY_START") {
