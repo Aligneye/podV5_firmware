@@ -1,4 +1,5 @@
 #include "device_time.h"
+#include "fixed_time_format.h"
 
 #include <Arduino.h>
 #include <time.h>
@@ -348,7 +349,7 @@ void formatEpochUTC(uint32_t epochSeconds, char *out, size_t outLen) {
     time_t t = (time_t)epochSeconds;
     struct tm tmv;
     gmtime_r(&t, &tmv);
-    strftime(out, outLen, "%Y-%m-%d %H:%M:%S", &tmv);
+    formatFixedTime(tmv, out, outLen, false);
 }
 
 void formatEpochISO(uint32_t epochSeconds, char *out, size_t outLen) {
@@ -362,7 +363,7 @@ void formatEpochISO(uint32_t epochSeconds, char *out, size_t outLen) {
     time_t t = (time_t)epochSeconds;
     struct tm tmv;
     gmtime_r(&t, &tmv);
-    strftime(out, outLen, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+    formatFixedTime(tmv, out, outLen, true);
 }
 
 void setDeviceTZOffset(int32_t offsetSeconds) {
@@ -389,7 +390,7 @@ void formatEpochLocal(uint32_t epochSeconds, char *out, size_t outLen) {
     struct tm tmv;
     gmtime_r(&t, &tmv);
     char body[20];
-    strftime(body, sizeof(body), "%Y-%m-%d %H:%M:%S", &tmv);
+    formatFixedTime(tmv, body, sizeof(body), false);
     int absOff = tz < 0 ? -tz : tz;
     snprintf(out, outLen, "%s %c%02d:%02d",
              body,

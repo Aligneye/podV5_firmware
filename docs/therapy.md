@@ -1,3 +1,19 @@
+## BLE start command
+
+Send a single duration field, `therapy_duration`, in minutes (10, 20, or 30):
+
+```json
+{"seq":713119817,"cmd":"THERAPY_START","therapy_duration":10,"therapy_intensity":2}
+```
+
+`therapy_duration` is required. Duration aliases (`duration`, `duration_min`,
+`therapy_duration_min`, `duration_sec`, `therapy_duration_sec`) are not read.
+The app should remove these duplicate fields from its outgoing command.
+Intensity accepts 1, 2, or 3. Unsupported duration values return `BAD_DURATION`.
+A repeated start updates the active session's total duration and intensity while
+preserving its elapsed time, session ID, and current pattern. If the new duration
+has already elapsed, the session ends on the next therapy loop update.
+
 Overview:
 The therapy.cpp file is responsible for managing the therapy mode of the posture tracking device.
 When therapy mode starts, the module generates a sequence of vibration patterns and controls the vibration motor accordingly. It also tracks therapy duration, switches between different therapy patterns, and ends the session automatically when the configured time is completed.

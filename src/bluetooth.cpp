@@ -72,26 +72,27 @@ static unsigned long batteryBlinkStartMs = 0;
 
 // ── Session sync FSM ─────────────────────────────────────────────────────
 // Streams stored sessions to the app after a FETCH_SESSIONS command.
-// One packet per loop tick, advanced only when notify() succeeds; nothing
-// is marked sent on flash until the app's final ACK_SESSIONS arrives.
+// Each session goes out as S_HDR, its S_EV chunks, then S_END (all keyed by
+// session id). One packet per loop tick, advanced only when notify()
+// succeeds; nothing is marked sent on flash until the app's final
+// ACK_SESSIONS arrives.
 enum class SyncState : uint8_t { Idle, Hdr, Stream, End, WaitAck, Retx };
 
 struct SyncEntry {
-    StoredSession s;
-    uint16_t seqBase;   // seq of this entry's summary packet
-    uint8_t  evCount;   // event items (posture pairs / therapy patterns)
-    uint8_t  evChunks;  // SEV packets that follow the summary
+    uint32_t id;        // session id
+    uint16_t seqBase;   // seq of this entry's S_HDR packet
+    uint8_t  evChunks;  // S_EV packets between S_HDR and S_END
 };
 
 static SyncState syncState = SyncState::Idle;
 static SyncEntry syncWindow[SYNC_MAX_WINDOW];
 static uint8_t  syncCount = 0;
 static uint8_t  syncEntryIdx = 0;
-static uint8_t  syncChunkIdx = 0;       // 0 = summary, 1..evChunks = SEV chunk
+static uint8_t  syncChunkIdx = 0;       // 0 = S_HDR, 1..evChunks = S_EV, evChunks+1 = S_END
 static uint16_t syncSeq = 0;
 static uint32_t syncXferId = 0;
 static uint16_t syncPairsPerChunk = 9;  // fixed per transfer from the MTU
-static uint16_t syncTherapyPerChunk = 30;
+static uint16_t syncTherapyPerChunk = 8;
 static unsigned long syncAckWaitStartMs = 0;
 static bool syncFastParamsActive = false;
 static volatile bool syncFetchRequested = false;
@@ -101,17 +102,19 @@ static uint16_t syncRetxList[16];
 static volatile uint8_t syncRetxCount = 0;
 static uint8_t syncRetxIdx = 0;
 static volatile bool sessAvailPending = false;
+static uint32_t sessAvailId = 0;    // latest stored session (live SESS_AVAIL hint)
+static uint8_t  sessAvailType = 0;
 
-// Event cache for the entry currently being streamed / retransmitted.
-static PostureEventReadResult syncPostureEv;
-static TherapyEventReadResult syncTherapyEv;
-static int syncEvLoadedFor = -1;
+// Record cache for the entry currently being streamed / retransmitted.
+static SessionRecord syncRec;
+static bool syncRecOk = false;
+static int  syncRecLoadedFor = -1;
 
 static void syncReset();
 static void onBleRawEvent(ble_evt_t* evt);
 static void onBleCccdWrite(uint16_t conn_handle, BLECharacteristic* chr, uint16_t value);
 
-static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 500UL;
+static constexpr uint32_t LIVE_PACKET_INTERVAL_MS = 150UL;
 static constexpr uint32_t TRAINING_TELEMETRY_INTERVAL_MS = 1000UL;
 static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t STATUS_PACKET_INTERVAL_MS = 5000UL;
@@ -446,8 +449,9 @@ static void sendLivePacket() {
 
     char payload[160];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"L\",\"mode\":\"%s\",\"angle\":%.2f,\"difficulty_angle\":%.0f,\"posture\":\"%s\"}",
+             "{\"t\":\"L\",\"mode\":\"%s\",\"id\":%lu,\"angle\":%.2f,\"difficulty_angle\":%.0f,\"posture\":\"%s\"}",
              currentModeText(),
+             (unsigned long)(isTrainingActive() ? getTrainingSessionNumber() : 0u),
              currentAngle,
              kBadPostureDeg,
              postureStr);
@@ -490,23 +494,26 @@ static void sendStatusTelemetry(const char* source = nullptr, const char* reason
     updatePostureAngle();
     const bool badNow = (currentAngle > kBadPostureDeg || currentAngle < -kBadPostureDeg);
 
-    char telemetryBuffer[256];
+    char telemetryBuffer[304];
     snprintf(
       telemetryBuffer,
       sizeof(telemetryBuffer),
-      "{\"t\":\"T\",\"mode\":\"%s\",\"sub_mode\":\"%s\","
+      "{\"t\":\"T\",\"mode\":\"%s\",\"id\":%lu,\"sub_mode\":\"%s\","
       "\"angle\":%.2f,"
       "\"difficulty_angle\":%.0f,"
       "\"posture\":\"%s\","
       "\"delay_ms\":%lu,"
+      "\"intensity\":%u,"
       "\"alert_active\":%s,"
       "\"profile_id\":%lu,\"profile\":\"%s\"}",
       "TRAINING",
+      (unsigned long)(isTrainingActive() ? getTrainingSessionNumber() : 0u),
       subModeStr,
       currentAngle,
       kBadPostureDeg,
       badNow ? "BAD POSTURE" : "GOOD POSTURE",
       (unsigned long)trainingDelayedAlertMs,
+      (unsigned)trainingIntensity,
       isTrainingMotorAlertActive ? "true" : "false",
       (unsigned long)profileId,
       profileName
@@ -1615,6 +1622,29 @@ static bool parseTrainingSubMode(const String& valueRaw, TrainingAlertStyle& out
 static bool extractJsonStringField(const String& payload, const char* key, String& out);
 static bool extractJsonIntField(const String& payload, const char* key, uint32_t& out);
 
+// Optional for older apps. Parse directly without allocating a numeric String,
+// and reject fractions, negatives and overflow instead of truncating to PWM.
+static bool extractTrainingIntensity(const String& payload, uint8_t& intensity) {
+    intensity = TRAINING_DEFAULT_INTENSITY;
+    const char* field = strstr(payload.c_str(), "\"intensity\"");
+    if (!field) return true;
+    const char* p = field + sizeof("\"intensity\"") - 1u;
+    while (isspace((unsigned char)*p)) ++p;
+    if (*p++ != ':') return false;
+    while (isspace((unsigned char)*p)) ++p;
+    if (!isdigit((unsigned char)*p)) return false;
+    if (*p == '0' && isdigit((unsigned char)p[1])) return false;
+    unsigned value = 0u;
+    do {
+        value = value * 10u + (unsigned)(*p++ - '0');
+        if (value > 255u) return false;
+    } while (isdigit((unsigned char)*p));
+    while (isspace((unsigned char)*p)) ++p;
+    if (*p != ',' && *p != '}') return false;
+    intensity = (uint8_t)value;
+    return true;
+}
+
 static bool extractTrainingStartFields(const String& payload,
                                        TrainingAlertStyle& subMode,
                                        uint32_t& difficultyAngle,
@@ -1657,6 +1687,7 @@ static bool extractTrainingStartFields(const String& payload,
 static bool startTrainingFromBle(TrainingAlertStyle subMode,
                                  uint32_t difficultyAngle,
                                  uint32_t delayMs,
+                                 uint8_t intensity,
                                  const char*& error) {
     if (isCalibrating()) {
         error = "CALIBRATING";
@@ -1666,6 +1697,7 @@ static bool startTrainingFromBle(TrainingAlertStyle subMode,
     trainingSubModeIndex = subMode;
     kBadPostureDeg = (float)difficultyAngle;
     trainingDelayedAlertMs = delayMs;
+    trainingIntensity = intensity;
     deviceOn = true;
     setDeviceMode(MODE_TRAINING);
     markSubModeChanged();
@@ -1678,13 +1710,6 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
         error = "CALIBRATING";
         return false;
     }
-    if (therapyIsRunning()) {
-        error = "ALREADY_RUNNING";
-        return false;
-    }
-
-    // Keep accepting the legacy duration choices so existing app versions can
-    // start therapy; the therapy engine always applies the fixed 20 minutes.
     if (durationMin != 10 && durationMin != 20 && durationMin != 30) {
         error = "BAD_DURATION";
         return false;
@@ -1696,11 +1721,14 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
     }
 
     therapyIntensityLevel = (int)intensity;
-    therapySubModeIndex = 1;
+    therapySubModeIndex = (durationMin == 10) ? 0 : (durationMin == 20) ? 1 : 2;
+    therapySetDurationMinutes(durationMin);
 
     deviceOn = true;
     setDeviceMode(MODE_THERAPY);
-    markSubModeChanged();
+    // An active session keeps its ID, elapsed time, and pattern position. The motor
+    // reads therapyIntensityLevel on its next update.
+    therapyStart();
     bluetoothNotifyStateChanged();
     return true;
 }
@@ -2030,7 +2058,8 @@ static void syncReset() {
     syncAckReceived = false;
     syncAckOk = false;
     syncFetchRequested = false;
-    syncEvLoadedFor = -1;
+    syncRecLoadedFor = -1;
+    syncRecOk = false;
     syncFastParamsActive = false;
 }
 
@@ -2051,79 +2080,106 @@ static void syncFinish(const char* why) {
     syncReset();
 }
 
-// Loads event detail for one window entry into the shared cache and fills
-// in evCount/evChunks. Chunks are sized so every SEV packet fits a single
-// notification for the MTU captured at transfer start.
-static void syncLoadEvents(uint8_t idx) {
-    if (syncEvLoadedFor == (int)idx) return;
+// Loads one window entry's record into the shared cache and fixes its
+// evChunks. Chunks are sized so every S_EV packet fits a single
+// notification for the MTU captured at transfer start. A record that has
+// vanished (evicted mid-transfer) streams as S_HDR with "err" + S_END.
+static void syncLoadRecord(uint8_t idx) {
+    if (syncRecLoadedFor == (int)idx) return;
     SyncEntry& e = syncWindow[idx];
-    e.evCount = 0;
-    e.evChunks = 0;
-
-    if (e.s.start_ts != 0) {
-        if (e.s.type == SESSION_TYPE_POSTURE &&
-            session_log_read_posture_events(e.s.start_ts, syncPostureEv)) {
-            e.evCount = syncPostureEv.pairCount;
-            e.evChunks = (e.evCount + syncPairsPerChunk - 1) / syncPairsPerChunk;
-        } else if (e.s.type == SESSION_TYPE_THERAPY &&
-                   session_log_read_therapy_events(e.s.start_ts, syncTherapyEv)) {
-            e.evCount = syncTherapyEv.count;
-            e.evChunks = (e.evCount + syncTherapyPerChunk - 1) / syncTherapyPerChunk;
-        }
+    syncRecOk = session_log_read(e.id, syncRec);
+    if (!syncRecOk) {
+        memset(&syncRec, 0, sizeof(syncRec));
+        syncRec.session_id = e.id;
     }
-    syncEvLoadedFor = (int)idx;
+    const uint16_t perChunk = (syncRec.type == SESSION_TYPE_THERAPY)
+                              ? syncTherapyPerChunk : syncPairsPerChunk;
+    e.evChunks = (uint8_t)((syncRec.event_count + perChunk - 1) / perChunk);
+    syncRecLoadedFor = (int)idx;
 }
 
-static bool syncSendSummary(uint8_t idx, uint16_t seq) {
-    syncLoadEvents(idx);
-    const SyncEntry& e = syncWindow[idx];
+static bool syncSendRecordHeader(uint8_t idx, uint16_t seq) {
+    syncLoadRecord(idx);
+    const SessionRecord& r = syncRec;
     char payload[192];
     snprintf(payload, sizeof(payload),
-             "{\"t\":\"SESS\",\"x\":%lu,\"q\":%u,\"ty\":%u,\"ts\":%lu,\"sy\":%u,"
-             "\"d\":%u,\"wc\":%u,\"wd\":%u,\"pat\":%u,\"ev\":%u,\"ec\":%u}",
-             (unsigned long)syncXferId, (unsigned)seq, (unsigned)e.s.type,
-             (unsigned long)e.s.start_ts, e.s.ts_synced ? 1u : 0u,
-             (unsigned)e.s.duration_sec, (unsigned)e.s.wrong_count,
-             (unsigned)e.s.wrong_dur_sec, (unsigned)e.s.therapy_pattern,
-             (unsigned)e.evCount, (unsigned)e.evChunks);
+             "{\"t\":\"S_HDR\",\"x\":%lu,\"q\":%u,\"id\":%lu,\"ty\":%u,\"ts\":%lu,"
+             "\"sy\":%u,\"tr\":%u,\"ec\":%u%s}",
+             (unsigned long)syncXferId, (unsigned)seq,
+             (unsigned long)r.session_id, (unsigned)r.type,
+             (unsigned long)r.start_ts,
+             (r.flags & SREC_FLAG_TIME_SYNCED) ? 1u : 0u,
+             (r.flags & SREC_FLAG_EVENTS_TRUNCATED) ? 1u : 0u,
+             (unsigned)syncWindow[idx].evChunks,
+             syncRecOk ? "" : ",\"err\":\"GONE\"");
     return sendBlePacket(payload);
 }
 
 static bool syncSendEventChunk(uint8_t idx, uint8_t chunk, uint16_t seq) {
-    syncLoadEvents(idx);
+    syncLoadRecord(idx);
     const SyncEntry& e = syncWindow[idx];
+    const SessionRecord& r = syncRec;
     if (chunk >= e.evChunks) return true;  // nothing to send; treat as done
 
+    const bool therapy = (r.type == SESSION_TYPE_THERAPY);
+    const uint16_t perChunk = therapy ? syncTherapyPerChunk : syncPairsPerChunk;
     char payload[336];
     int pos = snprintf(payload, sizeof(payload),
-                       "{\"t\":\"SEV\",\"x\":%lu,\"q\":%u,\"ts\":%lu,\"ty\":%u,"
+                       "{\"t\":\"S_EV\",\"x\":%lu,\"q\":%u,\"id\":%lu,\"ty\":%u,"
                        "\"i\":%u,\"n\":%u,\"e\":[",
                        (unsigned long)syncXferId, (unsigned)seq,
-                       (unsigned long)e.s.start_ts, (unsigned)e.s.type,
+                       (unsigned long)r.session_id, (unsigned)r.type,
                        (unsigned)chunk, (unsigned)e.evChunks);
 
-    if (e.s.type == SESSION_TYPE_POSTURE) {
-        uint16_t first = (uint16_t)chunk * syncPairsPerChunk;
-        uint16_t last = first + syncPairsPerChunk;
-        if (last > e.evCount) last = e.evCount;
-        for (uint16_t i = first; i < last; i++) {
+    const uint16_t first = (uint16_t)chunk * perChunk;
+    uint16_t last = first + perChunk;
+    if (last > r.event_count) last = r.event_count;
+    for (uint16_t i = first; i < last; i++) {
+        const SessionEvent& ev = r.events[i];
+        if (therapy) {
+            pos += snprintf(payload + pos, sizeof(payload) - pos, "%s[%u,%u,%u]",
+                            (i == first) ? "" : ",", (unsigned)ev.pattern,
+                            (unsigned)ev.start_off, (unsigned)ev.dur);
+        } else {
             pos += snprintf(payload + pos, sizeof(payload) - pos, "%s[%u,%u]",
                             (i == first) ? "" : ",",
-                            (unsigned)syncPostureEv.slouchOffsets[i],
-                            (unsigned)syncPostureEv.correctionOffsets[i]);
-        }
-    } else {
-        uint16_t first = (uint16_t)chunk * syncTherapyPerChunk;
-        uint16_t last = first + syncTherapyPerChunk;
-        if (last > e.evCount) last = e.evCount;
-        for (uint16_t i = first; i < last; i++) {
-            pos += snprintf(payload + pos, sizeof(payload) - pos, "%s%u",
-                            (i == first) ? "" : ",",
-                            (unsigned)syncTherapyEv.patterns[i]);
+                            (unsigned)ev.start_off, (unsigned)ev.dur);
         }
     }
     snprintf(payload + pos, sizeof(payload) - pos, "]}");
     return sendBlePacket(payload);
+}
+
+// Per-session end marker carrying the totals.
+static bool syncSendRecordEnd(uint8_t idx, uint16_t seq) {
+    syncLoadRecord(idx);
+    const SessionRecord& r = syncRec;
+    char payload[192];
+    if (r.type == SESSION_TYPE_THERAPY) {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"S_END\",\"x\":%lu,\"q\":%u,\"id\":%lu,\"ty\":%u,"
+                 "\"d\":%u,\"pc\":%u}",
+                 (unsigned long)syncXferId, (unsigned)seq,
+                 (unsigned long)r.session_id, (unsigned)r.type,
+                 (unsigned)r.total_sec, (unsigned)r.pattern_count);
+    } else {
+        snprintf(payload, sizeof(payload),
+                 "{\"t\":\"S_END\",\"x\":%lu,\"q\":%u,\"id\":%lu,\"ty\":%u,"
+                 "\"d\":%u,\"sc\":%u,\"bad\":%u,\"good\":%u}",
+                 (unsigned long)syncXferId, (unsigned)seq,
+                 (unsigned long)r.session_id, (unsigned)r.type,
+                 (unsigned)r.total_sec, (unsigned)r.slouch_count,
+                 (unsigned)r.bad_sec, (unsigned)r.good_sec);
+    }
+    return sendBlePacket(payload);
+}
+
+// Sends packet `chunk` of an entry: 0 = S_HDR, 1..evChunks = S_EV, then S_END.
+static bool syncSendEntryPacket(uint8_t idx, uint8_t chunk, uint16_t seq) {
+    syncLoadRecord(idx);
+    if (chunk == 0) return syncSendRecordHeader(idx, seq);
+    if (chunk <= syncWindow[idx].evChunks) return syncSendEventChunk(idx, chunk - 1, seq);
+    return syncSendRecordEnd(idx, seq);
 }
 
 // Retransmits one nacked seq by regenerating the packet from the window.
@@ -2131,9 +2187,8 @@ static bool syncSendEventChunk(uint8_t idx, uint8_t chunk, uint16_t seq) {
 static bool syncResendSeq(uint16_t seq) {
     for (uint8_t i = 0; i < syncCount; i++) {
         const SyncEntry& e = syncWindow[i];
-        if (seq < e.seqBase || seq > (uint16_t)(e.seqBase + e.evChunks)) continue;
-        if (seq == e.seqBase) return syncSendSummary(i, seq);
-        return syncSendEventChunk(i, (uint8_t)(seq - e.seqBase - 1), seq);
+        if (seq < e.seqBase || seq > (uint16_t)(e.seqBase + e.evChunks + 1)) continue;
+        return syncSendEntryPacket(i, (uint8_t)(seq - e.seqBase), seq);
     }
     return true;
 }
@@ -2167,17 +2222,15 @@ static void syncBeginTransfer() {
     syncPairsPerChunk = budget / 14;             // "[65535,65535]," per pair
     if (syncPairsPerChunk < 4) syncPairsPerChunk = 4;
     if (syncPairsPerChunk > 16) syncPairsPerChunk = 16;
-    syncTherapyPerChunk = budget / 4;            // "255," per pattern
-    if (syncTherapyPerChunk < 8) syncTherapyPerChunk = 8;
+    syncTherapyPerChunk = budget / 18;           // "[255,65535,65535]," per pattern
+    if (syncTherapyPerChunk < 2) syncTherapyPerChunk = 2;
     if (syncTherapyPerChunk > MAX_THERAPY_PATTERNS) syncTherapyPerChunk = MAX_THERAPY_PATTERNS;
 
-    StoredSession s;
-    int fileIndex = 0;
+    SessionIndexEntry entry;
     while (syncCount < SYNC_MAX_WINDOW &&
-           session_log_get_unsent(syncCount, s, fileIndex)) {
-        syncWindow[syncCount].s = s;
+           session_log_get_unsent(syncCount, entry)) {
+        syncWindow[syncCount].id = entry.session_id;
         syncWindow[syncCount].seqBase = 0;
-        syncWindow[syncCount].evCount = 0;
         syncWindow[syncCount].evChunks = 0;
         syncCount++;
     }
@@ -2190,12 +2243,12 @@ static void syncBeginTransfer() {
              (unsigned)syncPairsPerChunk);
 }
 
-// Commits a fully-acked transfer: batch-marks the window sent (tiny marker
-// appends, flushed together by session_log_loop) and compacts the log only
-// once everything unsent has drained.
+// Commits a fully-acked transfer: batch-marks the window sent by session id
+// (tiny marker appends, flushed together by session_log_loop) and compacts
+// the log only once everything unsent has drained.
 static void syncCommitWindow() {
     for (uint8_t i = 0; i < syncCount; i++) {
-        session_log_mark_sent_matching(syncWindow[i].s);
+        session_log_mark_sent(syncWindow[i].id);
     }
     if (session_log_count_unsent() == 0) {
         session_log_purge_sent();
@@ -2210,9 +2263,10 @@ static void syncProcess(unsigned long now, bool txBusy) {
     switch (syncState) {
         case SyncState::Idle:
             if (sessAvailPending && connected && !txBusy) {
-                char payload[64];
+                char payload[96];
                 snprintf(payload, sizeof(payload),
-                         "{\"t\":\"SESS_AVAIL\",\"n\":%d}",
+                         "{\"t\":\"SESS_AVAIL\",\"id\":%lu,\"ty\":%u,\"n\":%d}",
+                         (unsigned long)sessAvailId, (unsigned)sessAvailType,
                          session_log_count_unsent());
                 if (sendBlePacket(payload)) sessAvailPending = false;
             }
@@ -2240,18 +2294,14 @@ static void syncProcess(unsigned long now, bool txBusy) {
         case SyncState::Stream: {
             if (txBusy) break;
             SyncEntry& e = syncWindow[syncEntryIdx];
-            bool sent;
-            if (syncChunkIdx == 0) {
-                e.seqBase = syncSeq;
-                sent = syncSendSummary(syncEntryIdx, syncSeq);
-            } else {
-                sent = syncSendEventChunk(syncEntryIdx, syncChunkIdx - 1, syncSeq);
+            if (syncChunkIdx == 0) e.seqBase = syncSeq;
+            if (!syncSendEntryPacket(syncEntryIdx, syncChunkIdx, syncSeq)) {
+                break;  // FIFO full or CCCD off: retry same seq next tick
             }
-            if (!sent) break;  // FIFO full or CCCD off: retry same seq next tick
             syncLastProgressMs = now;
             syncSeq++;
             syncChunkIdx++;
-            if (syncChunkIdx > e.evChunks) {
+            if (syncChunkIdx > e.evChunks + 1) {  // S_END sent
                 syncChunkIdx = 0;
                 syncEntryIdx++;
             }
@@ -2352,8 +2402,13 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 TrainingAlertStyle subMode = TrainingAlertStyle::Instant;
                 uint32_t difficultyAngle = 0u;
                 uint32_t delayMs = 0u;
+                uint8_t intensity = TRAINING_DEFAULT_INTENSITY;
                 if (extractTrainingStartFields(payload, subMode, difficultyAngle, delayMs, error)) {
-                    ok = startTrainingFromBle(subMode, difficultyAngle, delayMs, error);
+                    if (!extractTrainingIntensity(payload, intensity)) {
+                        error = "BAD_INTENSITY";
+                    } else {
+                        ok = startTrainingFromBle(subMode, difficultyAngle, delayMs, intensity, error);
+                    }
                 }
             } else if (cmd == "SET_MODE") {
                 String mode;
@@ -2428,22 +2483,6 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
             } else if (cmd == "GET_THERAPY_PLAN") {
                 sendTherapyPlanPacket();
                 ok = true;
-            } else if (cmd == "THERAPY_START") {
-                uint32_t duration = 0;
-                uint32_t intensity = 0;
-                bool hasDuration = extractJsonIntField(payload, "therapy_duration", duration);
-                bool hasIntensity = extractJsonIntField(payload, "therapy_intensity", intensity);
-                if (hasDuration && hasIntensity) {
-                    if ((duration == 10 || duration == 20 || duration == 30) && (intensity >= 1 && intensity <= 3)) {
-                        // Duration is fixed in firmware; accept legacy app values
-                        // but always run a 20-minute session.
-                        therapySubModeIndex = 1;
-                        therapyIntensityLevel = (int)intensity;
-                        setDeviceMode(MODE_THERAPY);
-                        therapyStart();
-                        ok = true;
-                    }
-                }
             } else if (cmd == "TRAINING_STOP") {
                 ok = trainingtop();
             } else if (cmd == "THERAPY_START") {
@@ -2452,8 +2491,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 if (!extractJsonIntField(payload, "therapy_intensity", intensity) &&
                     !extractJsonIntField(payload, "intensity", intensity)) {
                     error = "BAD_REQUEST";
-                } else if (!extractJsonIntField(payload, "therapy_duration", durationMin) &&
-                           !extractJsonIntField(payload, "duration_min", durationMin)) {
+                } else if (!extractJsonIntField(payload, "therapy_duration", durationMin)) {
                     error = "BAD_REQUEST";
                 } else {
                     ok = startTherapyFromBle(intensity, durationMin, error);
@@ -3070,10 +3108,13 @@ void bluetoothNotifyStateChanged() {
     lastTherapyLiveSendMs = 0;
 }
 
-void notifyNewSessionStored() {
+void notifyNewSessionStored(uint32_t sessionId, uint8_t type) {
     // Called from the main loop right after a promoted session lands in the
-    // log. If the app is connected it gets a SESS_AVAIL hint on the next
-    // idle tick and can FETCH_SESSIONS immediately (live-to-stored handoff).
+    // log. If the app is connected it gets a SESS_AVAIL hint (with the id of
+    // the session that just ended) on the next idle tick and can
+    // FETCH_SESSIONS immediately (live-to-stored handoff).
+    sessAvailId = sessionId;
+    sessAvailType = type;
     if (connected && applicationAuthorized) {
         sessAvailPending = true;
     }

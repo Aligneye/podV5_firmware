@@ -37,6 +37,7 @@ static constexpr float kMotionThreshold = 2.0f;
 static constexpr float kDirectionDeg = 20.0f;
 float kBadPostureDeg = 30.0f;
 uint32_t trainingDelayedAlertMs = 5000UL;
+uint8_t trainingIntensity = TRAINING_DEFAULT_INTENSITY;
 static constexpr float kAngleClampDeg = 90.0f;
 static constexpr float kDefaultOriginY = 6.75f;
 static constexpr float kDefaultOriginZ = 6.75f;
@@ -190,7 +191,6 @@ void trainingGetFilteredAccel(float *outY, float *outZ) {
 }
 
 // Session stats (training mode)
-static Mode s_lastModeForSession = MODE_IDLE;
 
 #if ALIGN_RTT_SENSOR_LOG
 static unsigned long s_lastSensorRttMs = 0;
@@ -510,7 +510,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     trainingSubModeIndex = TrainingAlertStyle::Instant;
   }
 
-  if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts) {
+  if (trainingSubModeIndex == TrainingAlertStyle::NoAlerts || trainingIntensity == 0u) {
     motorSetDuty(0);
     s_badMotorStartMs = 0;
     isTrainingMotorAlertActive = false;
@@ -543,7 +543,7 @@ static void applyTrainingMotorFeedback(uint32_t now) {
     s_vibToggleMs = now;
     s_vibOn = !s_vibOn;
   }
-  motorSetDuty(s_vibOn ? VIB_INTENSITY_MAX : 0);
+  motorSetDuty(s_vibOn ? trainingIntensity : 0);
 }
 
 void sleepPostureSensor() {
@@ -646,19 +646,19 @@ void trainingLoop() {
 
   bool sampleReady = false;
   if (currentMode == MODE_TRAINING) {
-    if (s_lastModeForSession != MODE_TRAINING) {
+    // Idle skips trainingLoop(), and setDeviceMode() stops the session
+    // directly. Use the recorder's state so re-entry always starts a new one.
+    if (!isTrainingActive()) {
       wakePostureSensor();
       trainingStart();
-      s_lastModeForSession = MODE_TRAINING;
     }
     sampleReady = updatePostureAngle();
     applyTrainingMotorFeedback(now);
     logTrainingSensorRtt(now);
   } else {
-    if (s_lastModeForSession == MODE_TRAINING) {
+    if (isTrainingActive()) {
       trainingStop();
     }
-    s_lastModeForSession = currentMode;
 
     if (sensorInitialized) {
       sampleReady = trainingIngestAccelSample();

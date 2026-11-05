@@ -34,4 +34,4 @@ uint8_t bluetoothGetBatteryPercentage();
 bool bluetoothIsMotorActive();
 
 /** Notify BLE layer that a new session was stored. */
-void notifyNewSessionStored();
+void notifyNewSessionStored(uint32_t sessionId, uint8_t type);
