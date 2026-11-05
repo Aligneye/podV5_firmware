@@ -34,10 +34,6 @@ int currentPatternIndex = 0;
 TrainingDelay currentTrainingDelay = TRAIN_INSTANT;
 unsigned long therapyDuration = THERAPY_DURATION_20_MIN;
 
-static unsigned long fixedTherapyDuration() {
-    return THERAPY_DURATION_20_MIN;
-}
-
 uint16_t getTherapyTotalPatternCount() {
     return (uint16_t)totalPatterns;
 }
@@ -270,21 +266,34 @@ void therapySetup() {
 
 void therapyEnsurePatternsInitialized() {
     if (!patternsInitialized) {
-        therapyDurationMs = fixedTherapyDuration();
+        therapyDurationMs = therapyDuration;
         initializePatternSequence();
     }
 }
 
+void therapySetDurationMinutes(uint32_t durationMin) {
+    if (durationMin != 10 && durationMin != 20 && durationMin != 30) return;
+    therapyDuration = durationMin * 60000UL;
+    therapyDurationMs = therapyDuration;
+    if (therapyState == THERAPY_RUNNING) {
+        const int previousCount = totalPatterns;
+        totalPatterns = (int)((therapyDurationMs + THERAPY_PATTERN_MS - 1) / THERAPY_PATTERN_MS);
+        if (totalPatterns > MAX_THERAPY_PATTERNS) totalPatterns = MAX_THERAPY_PATTERNS;
+        for (int i = previousCount; i < totalPatterns; ++i) {
+            patternSequence[i] = (i < PATTERN_COUNT) ? i : random(0, PATTERN_COUNT);
+        }
+    }
+}
+
 void therapyStart() {
-    // Repeated start commands may update intensity during the same session.
+    // Repeated start commands may update intensity/duration during the same session.
     if (therapyState == THERAPY_RUNNING) return;
 
     therapySessionId++;
     if (therapySessionId == 0) {
         therapySessionId = 1;
     }
-    therapyDurationMs = fixedTherapyDuration();
-    therapyDuration = therapyDurationMs;
+    therapyDurationMs = therapyDuration;
     therapyStartMs = millis();
     patternStartMs = therapyStartMs;
     lastTickMs = therapyStartMs;

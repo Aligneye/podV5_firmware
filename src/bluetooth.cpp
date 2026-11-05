@@ -1710,8 +1710,6 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
         error = "CALIBRATING";
         return false;
     }
-    // Keep accepting the legacy duration choices so existing app versions can
-    // start therapy; the therapy engine always applies the fixed 20 minutes.
     if (durationMin != 10 && durationMin != 20 && durationMin != 30) {
         error = "BAD_DURATION";
         return false;
@@ -1723,11 +1721,12 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
     }
 
     therapyIntensityLevel = (int)intensity;
-    therapySubModeIndex = 1;
+    therapySubModeIndex = (durationMin == 10) ? 0 : (durationMin == 20) ? 1 : 2;
+    therapySetDurationMinutes(durationMin);
 
     deviceOn = true;
     setDeviceMode(MODE_THERAPY);
-    // An active session keeps its ID, timer, and pattern position. The motor
+    // An active session keeps its ID, elapsed time, and pattern position. The motor
     // reads therapyIntensityLevel on its next update.
     therapyStart();
     bluetoothNotifyStateChanged();
@@ -2492,8 +2491,7 @@ static void parseAndApplyBleCommand(const String &payloadRaw) {
                 if (!extractJsonIntField(payload, "therapy_intensity", intensity) &&
                     !extractJsonIntField(payload, "intensity", intensity)) {
                     error = "BAD_REQUEST";
-                } else if (!extractJsonIntField(payload, "therapy_duration", durationMin) &&
-                           !extractJsonIntField(payload, "duration_min", durationMin)) {
+                } else if (!extractJsonIntField(payload, "therapy_duration", durationMin)) {
                     error = "BAD_REQUEST";
                 } else {
                     ok = startTherapyFromBle(intensity, durationMin, error);

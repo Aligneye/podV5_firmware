@@ -29,7 +29,7 @@ const char *therapySubModes[] = {"10 min", "20 min", "30 min"};
 bool deviceOn = true;
 Mode currentMode = MODE_IDLE;
 TrainingAlertStyle trainingSubModeIndex = TrainingAlertStyle::Instant;
-uint8_t therapySubModeIndex = 1; // Therapy duration is fixed at 20 minutes.
+uint8_t therapySubModeIndex = 1; // Default therapy duration: 20 minutes.
 unsigned long lastModeChangeMs = 0;
 unsigned long lastModeChangeDelayMs = MODE_SWITCH_DELAY_MS;
 

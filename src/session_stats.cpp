@@ -341,6 +341,7 @@ void onTherapyStarted() {
 }
 
 static void finalizeTherapyRecord() {
+    therapySubMode = (uint8_t)(therapyDuration / 60000UL);
     unsigned long elapsedMs = millis() - therapyEnteredMs;
     uint32_t durationSec    = (uint32_t)(elapsedMs / 1000UL);
     uint32_t nowEpoch       = getDeviceTime();
