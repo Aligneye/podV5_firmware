@@ -143,7 +143,7 @@ static void calibrationFail(const char* reason) {
     isCalibrationRunning = false;
     notifyCalibrationStatus("failed", "done");
     notifyCalibrationComplete(false, 0u, "", 0u, (uint16_t)totalSamples, reason);
-    goToIdleMode();
+    goToTrainingMode();  // fail/pass both land in Training
     startCalibrationFailureHaptic();
 
 }
@@ -171,7 +171,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "LOW_QUALITY");
-        goToIdleMode();
+        goToTrainingMode();  // fail/pass both land in Training
         startCalibrationFailureHaptic();
 
         return;
@@ -200,7 +200,7 @@ static void calibrationSuccess(float avgX, float avgY, float avgZ, uint16_t pass
         isCalibrationRunning = false;
         notifyCalibrationStatus("failed", "done");
         notifyCalibrationComplete(false, 0u, "", quality, passedSamples, "PROFILE_SAVE_FAILED");
-        goToIdleMode();
+        goToTrainingMode();  // fail/pass both land in Training
         startCalibrationFailureHaptic();
 
         return;

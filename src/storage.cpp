@@ -45,7 +45,7 @@ struct PersistedSettings {
     uint32_t magic;
     uint16_t version;
     uint8_t  trainingDelay;
-    uint8_t  reserved;
+    uint8_t  trainingAngleDeg;   // 0 = never set by user -> firmware default
     float     calY;
     float     calZ;
     uint8_t            profileCount;
@@ -192,7 +192,7 @@ static bool migrateSettingsV5(const void* raw) {
     g_settings.magic = SETTINGS_MAGIC;
     g_settings.version = SETTINGS_VERSION;
     g_settings.trainingDelay = old->trainingDelay;
-    g_settings.reserved = old->reserved;
+    g_settings.trainingAngleDeg = old->reserved;
     g_settings.calY = old->calY;
     g_settings.calZ = old->calZ;
     g_settings.profileCount = (old->profileCount > 8u) ? 8u : old->profileCount;
@@ -398,6 +398,34 @@ TrainingDelay loadTrainingDelay() {
         d = (uint8_t)TRAIN_INSTANT;
     }
     return (TrainingDelay)d;
+}
+
+uint8_t storageLoadTrainingAngle() {
+    return g_settings.trainingAngleDeg;
+}
+
+bool storageSaveTrainingAngle(uint8_t deg) {
+    if (g_settings.trainingAngleDeg == deg) return true;
+    g_settings.trainingAngleDeg = deg;
+    return persistSettings();
+}
+
+// Therapy params live in reserved2[1] (intensity 1-3) and reserved2[2]
+// (duration minutes); 0 = never set -> firmware defaults (Mid, 10 min).
+bool storageLoadTherapyParams(uint8_t* intensity, uint8_t* durationMin) {
+    const uint8_t i = g_settings.reserved2[1];
+    const uint8_t d = g_settings.reserved2[2];
+    if (i < 1 || i > 3 || (d != 10 && d != 20 && d != 30)) return false;
+    if (intensity) *intensity = i;
+    if (durationMin) *durationMin = d;
+    return true;
+}
+
+bool storageSaveTherapyParams(uint8_t intensity, uint8_t durationMin) {
+    if (g_settings.reserved2[1] == intensity && g_settings.reserved2[2] == durationMin) return true;
+    g_settings.reserved2[1] = intensity;
+    g_settings.reserved2[2] = durationMin;
+    return persistSettings();
 }
 
 uint8_t storageLoadTherapySubMode() {

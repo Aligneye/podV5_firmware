@@ -28,6 +28,15 @@ bool storageGetDeferredPersistResult(uint32_t ticket,
 bool saveTrainingDelay(TrainingDelay delay);
 TrainingDelay loadTrainingDelay();
 
+// Posture-angle (degrees) last chosen from the app; 0 = never set.
+uint8_t storageLoadTrainingAngle();
+bool    storageSaveTrainingAngle(uint8_t deg);
+
+// Last therapy intensity (1-3) and duration (min) chosen by the user.
+// Load returns false if nothing has been saved yet.
+bool storageLoadTherapyParams(uint8_t* intensity, uint8_t* durationMin);
+bool storageSaveTherapyParams(uint8_t intensity, uint8_t durationMin);
+
 uint8_t storageLoadTherapySubMode();
 bool    storageSaveTherapySubMode(uint8_t idx);
 

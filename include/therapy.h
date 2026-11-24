@@ -29,6 +29,8 @@ extern bool isTherapyRunning;
 void therapySetup();
 void therapyLoop();
 void therapyEnsurePatternsInitialized();
+/** Persist current intensity + duration so the next therapy starts with them. */
+void therapySaveParams();
 /** Sets total session duration (10/20/30 minutes), preserving elapsed time. */
 void therapySetDurationMinutes(uint32_t durationMin);
 

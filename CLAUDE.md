@@ -30,7 +30,9 @@ Flashing uses a custom script (`upload_hooks.py`) that invokes OpenOCD with CMSI
 7. `maintainDeviceTime()` — auto-persist RTC epoch to flash every 30s
 8. `updateSessionStats()` + `maintainSessionStats()` — session event tracking and promotion
 
-**Mode state machine** (managed in `button.cpp`): the device boots in `IDLE`; a single click toggles `IDLE ↔ TRAINING`, a hold enters `THERAPY`, and a single click or completed session returns `THERAPY → IDLE`. Double-click starts calibration from `IDLE` or `TRAINING`; triple-click in `IDLE` enters sleep.
+**Mode state machine** (managed in `button.cpp`): the device boots in `IDLE`; a single click cycles `IDLE → TRAINING → THERAPY → IDLE`. Double-click starts calibration from `IDLE` or `TRAINING` (pass or fail both land in `TRAINING`) and cycles therapy intensity Mid → High → Low in `THERAPY`. A hold in any mode unpairs BLE and powers off (System OFF); powering on needs a hold (a `/pwroff.flg` flash marker gates the wake, because the bootloader clears `RESETREAS`). Triple-click in `IDLE` enters sleep. The button is sampled every 5 ms by a FreeRTOS timer; gestures are queued and executed in `buttonLoop()`.
+
+**Bootloader**: the pod runs an AlignEye build of the Adafruit 0.9.1 bootloader (`bootloader/`) with its LEDs moved off P0.17 (the motor) to P0.30/P0.31; the stock Feather bootloader buzzes the motor on every boot. `update_bootloader.ps1` replaces only the bootloader region (keeps app + data); `factory_flash.ps1` uses it for blank devices.
 
 **Posture detection** (`src/training.cpp`): LIS3DH accelerometer sampled at 100 Hz over I2C, low-pass filtered (α=0.1), then angle computed via dot product against the stored calibration reference vector. Bad posture triggers motor feedback.
 

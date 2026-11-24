@@ -12,6 +12,10 @@ void onTherapyEnded();
 
 void updateSessionStats();
 void maintainSessionStats();
+/** Background persistence of session counters; call every loop. */
+void sessionStatsBackgroundLoop();
+/** Blocking flush (power-off). */
+void sessionStatsFlushNow();
 
 uint32_t getTrainingSessionNumber();
 uint32_t getTrainingSessionDurationSec();

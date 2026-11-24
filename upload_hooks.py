@@ -5,14 +5,20 @@ from pathlib import Path
 
 Import("env")
 
-def find_openocd():
-    platformio_home = Path.home() / ".platformio"
-    
-    if sys.platform.startswith("win"):
-        openocd = platformio_home / "packages" / "tool-openocd" / "bin" / "openocd.exe"
-    else:
-        openocd = platformio_home / "packages" / "tool-openocd" / "bin" / "openocd"
+def openocd_dir():
+    # Ask PlatformIO where it installed tool-openocd (platform_packages in
+    # platformio.ini), so this works on any PC / custom PLATFORMIO_CORE_DIR.
+    try:
+        d = env.PioPlatform().get_package_dir("tool-openocd")
+        if d:
+            return Path(d)
+    except Exception:
+        pass
+    return Path.home() / ".platformio" / "packages" / "tool-openocd"
 
+def find_openocd():
+    exe = "openocd.exe" if sys.platform.startswith("win") else "openocd"
+    openocd = openocd_dir() / "bin" / exe
     if openocd.exists():
         return str(openocd)
 
@@ -28,8 +34,7 @@ def upload_firmware(source, target, env):
     firmware_bin = build_dir / "firmware.bin"
     signature_bin = build_dir / "firmware_signature.bin"
 
-    platformio_home = Path.home() / ".platformio"
-    scripts_dir = platformio_home / "packages" / "tool-openocd" / "openocd" / "scripts"
+    scripts_dir = openocd_dir() / "openocd" / "scripts"
 
     if not firmware_bin.exists():
         raise Exception(f"Firmware file not found: {firmware_bin}")

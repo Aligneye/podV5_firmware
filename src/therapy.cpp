@@ -4,6 +4,7 @@
 #include "calibration.h"
 #include "motor.h"
 #include "session_stats.h"
+#include "storage.h"
 #include "rtt_debugger.h"
 #include <math.h>
 
@@ -19,7 +20,7 @@ static const char* PATTERN_NAMES[] = {
 
 static TherapyState therapyState = THERAPY_IDLE;
 static unsigned long therapyStartMs = 0;
-static unsigned long therapyDurationMs = THERAPY_DURATION_20_MIN;
+static unsigned long therapyDurationMs = THERAPY_DURATION_10_MIN;
 static unsigned long patternStartMs = 0;
 static unsigned long lastTickMs = 0;
 static bool patternsInitialized = false;
@@ -32,7 +33,7 @@ static int patternSequence[MAX_THERAPY_PATTERNS];
 static int totalPatterns = 0;
 int currentPatternIndex = 0;
 TrainingDelay currentTrainingDelay = TRAIN_INSTANT;
-unsigned long therapyDuration = THERAPY_DURATION_20_MIN;
+unsigned long therapyDuration = THERAPY_DURATION_10_MIN;
 
 uint16_t getTherapyTotalPatternCount() {
     return (uint16_t)totalPatterns;
@@ -119,7 +120,7 @@ static void printTick(unsigned long now) {
 static void patternMuscleActivation(unsigned long e) {
     const unsigned long span = THERAPY_PATTERN_MS;
     const unsigned long capped = (e < span) ? e : span;
-    float pct = 30.0f + ((float)capped / (float)span) * 70.0f;
+    float pct = 60.0f + ((float)capped / (float)span) * 40.0f;  // starts strong enough to feel at once
     motorSetDuty(constrain((int)((pct / 100.0f) * 255.0f), 0, 255));
 }
 
@@ -257,7 +258,23 @@ static void executePattern(int idx, unsigned long e) {
     }
 }
 
+extern int therapyIntensityLevel;
+extern uint8_t therapySubModeIndex;
+
+void therapySaveParams() {
+    storageBeginBatch();
+    storageSaveTherapyParams((uint8_t)therapyIntensityLevel,
+                             (uint8_t)(therapyDuration / 60000UL));
+    storageCommitBatchDeferred();
+}
+
 void therapySetup() {
+    uint8_t savedIntensity = 0, savedMin = 0;
+    if (storageLoadTherapyParams(&savedIntensity, &savedMin)) {
+        therapyIntensityLevel = savedIntensity;
+        therapySetDurationMinutes(savedMin);
+        therapySubModeIndex = (savedMin == 10) ? 0 : (savedMin == 20) ? 1 : 2;
+    }
     motorSetup();
     therapyState = THERAPY_IDLE;
     patternsInitialized = false;
@@ -307,6 +324,9 @@ void therapyStart() {
     rtt.print(" (");
     rtt.print((unsigned long)(therapyDurationMs / 60000UL));
     rtt.println(" min session)");
+    // Immediate, unmistakable start cue (priority pulse; scaled by intensity).
+    // Before any session bookkeeping so nothing can delay it.
+    motorOverrideDuty(255, 300);
     onTherapyStarted();
 }
 

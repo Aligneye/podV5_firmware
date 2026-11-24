@@ -24,7 +24,7 @@ by the pod as proof of ownership.
 | Data characteristic UUID | `beb5483e-36e1-4688-b7f5-ea07361b26a8` |
 | Characteristic properties | Read, write, write without response, notify |
 | Characteristic security | Encrypted BLE link, no MITM requirement |
-| Pairing-window duration | 120 seconds |
+| Pairing-window duration | 300 seconds (5 min) |
 | Security timeout | 10 seconds |
 | Owner-commit timeout | 5 seconds |
 | Post-authorization readiness gate | Notification subscription; no fixed delay |
