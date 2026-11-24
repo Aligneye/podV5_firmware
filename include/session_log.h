@@ -77,6 +77,8 @@ void session_log_init();
 // Flushes queued appends from the main loop so session-end writes never
 // block a button press. Call every loop iteration.
 void session_log_loop();
+// Blocking: writes everything still queued to flash (used right before power-off).
+void session_log_flush_now();
 // Queues a completed session for storage. Returns false only if it could
 // not be queued at all.
 bool session_log_append(const SessionRecord& rec);

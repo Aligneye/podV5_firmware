@@ -6,7 +6,32 @@
 #include "motor.h"
 #include "rtt_debugger.h"
 #include "training.h"
+#include "session_stats.h"
+#include "session_log.h"
 #include "nrf_gpio.h"
+#include "nrf.h"
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
+
+using namespace Adafruit_LittleFS_Namespace;
+
+// Marker file meaning "the user powered the pod off". RESETREAS cannot be used
+// to detect a wake from System OFF: the bootloader clears it before the app
+// runs (observed RESETREAS=0 on every boot), so the hold-to-power-on check
+// relies on this flash marker instead.
+static const char* kPowerOffMarkerPath = "/pwroff.flg";
+// Measured from app start; the bootloader already consumed part of the hold.
+static constexpr uint32_t kPowerOnHoldMs = 800UL;
+
+static void writePowerOffMarker() {
+    InternalFS.begin();
+    File f = InternalFS.open(kPowerOffMarkerPath, FILE_O_WRITE);
+    if (f) {
+        const uint8_t v = 1;
+        f.write(&v, 1);
+        f.close();
+    }
+}
 
 extern RTTStream rtt;
 static AlignRttSilencer s_nonBleRtt;
@@ -41,7 +66,12 @@ static void blinkSleepLed(bool redOn, bool greenOn, bool blueOn) {
 
 static void hardReleaseMotor() {
     motorSetDuty(0);
-    nrf_gpio_cfg_default(PIN_MOTOR);
+    // Actively drive the motor driver input LOW. A floating (default/input)
+    // pin can let the driver gate drift on and buzz the motor hard while the
+    // pod is "off". GPIO output state is retained through System OFF.
+    const uint32_t motorPin = g_ADigitalPinMap[PIN_MOTOR];
+    nrf_gpio_pin_clear(motorPin);
+    nrf_gpio_cfg_output(motorPin);
 }
 
 static bool sleepTimerEligible() {
@@ -50,23 +80,33 @@ static bool sleepTimerEligible() {
            !isCalibrating();
 }
 
-static void enterSleepModeInternal(bool requireDisconnected) {
+static void enterSleepModeInternal(bool requireDisconnected, bool unpair = false) {
     // State may have changed after the timeout check earlier in this loop.
-    if (s_sleeping || currentMode != MODE_IDLE || isCalibrating() ||
-        (requireDisconnected && bluetoothIsConnected())) {
+    // A power-off (unpair) request is allowed from any mode.
+    if (s_sleeping ||
+        (!unpair && (currentMode != MODE_IDLE || isCalibrating() ||
+                     (requireDisconnected && bluetoothIsConnected())))) {
         return;
     }
 
     s_sleeping = true;
-    logEvent("SLEEP", "enter_idle_then_off");
+    logEvent("SLEEP", unpair ? "power_off_unpair" : "enter_idle_then_off");
 
+    // Stops training/therapy and cancels calibration as side effects.
     if (currentMode != MODE_IDLE) {
         setDeviceMode(MODE_IDLE);
+    }
+    if (isCalibrating()) {
+        calibrationRequestCancel();
     }
 
     motorCancelFeedback();
     motorSetDuty(0);
-    bluetoothPrepareForSleep();
+    if (unpair) {
+        bluetoothUnpairAndShutdown();
+    } else {
+        bluetoothPrepareForSleep();
+    }
     sleepPostureSensor();
 
     blinkSleepLed(true, false, false);
@@ -75,6 +115,23 @@ static void enterSleepModeInternal(bool requireDisconnected) {
     hardReleaseSleepLeds();
 
     hardReleaseMotor();
+
+    // Persist any just-ended session before the chip powers down.
+    sessionStatsFlushNow();
+    session_log_flush_now();
+
+    // The button is still held when power-off triggers. SENSE_LOW would wake
+    // the chip instantly, so wait for release (bounded) before System OFF.
+    {
+        const uint32_t t0 = millis();
+        while (digitalRead(PIN_BUTTON) == LOW && (millis() - t0) < 10000UL) {
+            delay(10);
+        }
+        delay(100);  // debounce the release
+    }
+
+    // Next wake must be a deliberate hold, not a tap.
+    writePowerOffMarker();
 
     rtt.println("Entering System OFF");
     // Framework wrapper maps the Arduino pin, configures pull-up/SENSE_LOW,
@@ -91,6 +148,44 @@ static void enterSleepModeInternal(bool requireDisconnected) {
 
 void enterSleepMode() {
     enterSleepModeInternal(false);
+}
+
+void powerOffDevice() {
+    enterSleepModeInternal(false, true);
+}
+
+void powerOnGate() {
+    // Hold the motor off from the very first instruction (wake reset puts the
+    // pin back to a floating input until motorSetup()).
+    pinMode(PIN_MOTOR, OUTPUT);
+    digitalWrite(PIN_MOTOR, LOW);
+
+    // Only gate boots that follow a user power-off; flashing/reset boot normally.
+    InternalFS.begin();
+    if (!InternalFS.exists(kPowerOffMarkerPath)) {
+        return;
+    }
+
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
+    const uint32_t t0 = millis();
+    while (digitalRead(PIN_BUTTON) == LOW) {
+        if ((millis() - t0) >= kPowerOnHoldMs) {
+            // Held long enough: power on for real.
+            InternalFS.remove(kPowerOffMarkerPath);
+            // Wait for release so the hold isn't also read as a click/hold.
+            while (digitalRead(PIN_BUTTON) == LOW) {
+                delay(10);
+            }
+            delay(100);
+            return;
+        }
+        delay(10);
+    }
+    // Tap (or spurious wake): stay off. Marker stays so the next wake is gated too.
+    systemOff(PIN_BUTTON, LOW);
+    while (true) {
+        waitForEvent();
+    }
 }
 
 void sleepTimerSetup() {

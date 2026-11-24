@@ -167,13 +167,26 @@ static void loadState() {
     file.close();
 }
 
+static bool s_stateSavePending = false;
+static uint32_t s_stateSaveDueMs = 0;
+
 static bool saveState() {
+    s_stateSavePending = false;
     return writeStateAtomic();
+}
+
+// Flash writes can block the main loop for a long time (LittleFS erase/rename,
+// slower still while BLE is connected). Session *start* must not wait for one,
+// so the id counter is flushed shortly afterwards from maintainSessionStats().
+static void scheduleSaveState() {
+    s_stateSavePending = true;
+    s_stateSaveDueMs = millis() + 1500UL;
 }
 
 #else
 static void loadState() {}
 static bool saveState() { return false; }
+static void scheduleSaveState() {}
 #endif
 
 void initSessionStats() {
@@ -212,7 +225,7 @@ void onTrainingStarted() {
     trainingStartTicks    = getDeviceTicks();
     trainingSubMode       = trainingDelayToSubMode(currentTrainingDelay);
     trainingCurrentId     = claimSessionId();
-    saveState();
+    scheduleSaveState();
     slouchCount           = 0;
     correctionCount       = 0;
     eventBufferOverflowed = false;
@@ -237,7 +250,7 @@ static void finalizeTrainingRecord() {
     state.trainingSessionCount++;
     state.lastTrainingStartEpoch = startEpoch;
     state.lastTrainingEndEpoch   = getDeviceTime();
-    saveState();
+    scheduleSaveState();
 
     // Slouch periods alternate slouch[i] -> correction[i]; one still open
     // at the end lasts until the session ended.
@@ -335,7 +348,7 @@ void onTherapyStarted() {
     therapyStartTicks  = getDeviceTicks();
     therapySubMode     = (uint8_t)(therapyDuration / 60000UL);
     therapyCurrentId   = claimSessionId();
-    saveState();
+    scheduleSaveState();
     serialPrintf("SESSION: Therapy entered (pending id=%lu, subMode=%u min)\n",
                  (unsigned long)therapyCurrentId, (unsigned)therapySubMode);
 }
@@ -360,7 +373,7 @@ static void finalizeTherapyRecord() {
     state.therapySessionCount++;
     state.lastTherapyStartEpoch = startEpoch;
     state.lastTherapyEndEpoch   = getDeviceTime();
-    saveState();
+    scheduleSaveState();
 
     SessionRecord& rec = s_record;
     memset(&rec, 0, sizeof(rec));
@@ -462,6 +475,23 @@ void updateSessionStats() {
             rtt.println(">>> Therapy 30s reached - will be SAVED on exit <<<");
         }
     }
+}
+
+// Runs every loop iteration, in every mode (incl. Idle), so a session that just
+// ended is persisted in the background even though the user already moved on.
+void sessionStatsBackgroundLoop() {
+#if SESSION_HAS_FS
+    if (s_stateSavePending && (int32_t)(millis() - s_stateSaveDueMs) >= 0) {
+        saveState();
+    }
+#endif
+}
+
+// Synchronous flush for deliberate power-off.
+void sessionStatsFlushNow() {
+#if SESSION_HAS_FS
+    if (s_stateSavePending) saveState();
+#endif
 }
 
 void maintainSessionStats() {

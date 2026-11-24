@@ -11,7 +11,7 @@
 // ── RGB LED ───────────────────────────────────────────────
 #define PIN_LED_RED     13   // P0.13 → Arduino 13
 #define PIN_LED_GREEN   14   // P0.14 → Arduino 14
-#define PIN_LED_BLUE    15   // P0.15 → Arduino 15
+#define PIN_LED_BLUE    15   // P0.15 → Arduino 15s
 
 // ── Motor ─────────────────────────────────────────────────
 #define PIN_MOTOR       17   // P0.17 → Arduino 17
@@ -27,10 +27,10 @@
 #define PIN_BATTERY_ADC A0   // BATPER → P0.02/AIN0
 
 // ── Button timing (ms) ────────────────────────────────────
-#define DEBOUNCE_MS         50
-#define DOUBLE_CLICK_GAP_MS 400
+#define DEBOUNCE_MS         30
+#define DOUBLE_CLICK_GAP_MS 200
 #define HOLD_MS             1000
-#define MODE_SWITCH_DELAY_MS    500UL
+#define MODE_SWITCH_DELAY_MS    100UL
 #define SUBMODE_SWITCH_DELAY_MS 250UL
 
 // ── Vibration intensity (PWM 0-255) ───────────────────────
@@ -81,7 +81,7 @@
 // Pairing is deliberately time-bounded.  Outside this window an unowned pod
 // stays non-connectable, and an owned pod accepts only its stored BLE owner.
 #ifndef BLE_PAIRING_WINDOW_MS
-#define BLE_PAIRING_WINDOW_MS               120000UL
+#define BLE_PAIRING_WINDOW_MS               300000UL  // 5 min
 #endif
 #ifndef BLE_SECURITY_TIMEOUT_MS
 #define BLE_SECURITY_TIMEOUT_MS             10000UL

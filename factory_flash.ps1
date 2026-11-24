@@ -1,6 +1,8 @@
 $OPENOCD = "$env:USERPROFILE\.platformio\packages\tool-openocd\bin\openocd.exe"
 $SCRIPTS = "$env:USERPROFILE\.platformio\packages\tool-openocd\openocd\scripts"
-$BOOTLOADER = "$env:USERPROFILE\.platformio\packages\framework-arduinoadafruitnrf52\bootloader\feather_nrf52832\feather_nrf52832_bootloader-0.9.1_s132_6.1.1.hex"
+# AlignEye build of the Adafruit 0.9.1 bootloader: LEDs moved off P0.17 (motor)
+# and P0.19 to P0.30/P0.31. See bootloader/board.h and update_bootloader.ps1.
+$BOOTLOADER = Join-Path $PSScriptRoot "bootloader\aligneye_pod_v5_bootloader-0.9.1_s132_6.1.1.hex"
 
 Write-Host "========================================="
 Write-Host " AlignEye Pod Factory Flash"

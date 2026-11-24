@@ -9,3 +9,4 @@ bluetooth/
 
 # Temporary local Git metadata
 .git-offline-temp/
+bootloader/backup_bootloader_0x74000.bin

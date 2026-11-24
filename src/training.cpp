@@ -35,7 +35,7 @@ static AlignRttSilencer s_nonBleRtt;
 static constexpr float kLpfAlpha = 0.1f;
 static constexpr float kMotionThreshold = 2.0f;
 static constexpr float kDirectionDeg = 20.0f;
-float kBadPostureDeg = 30.0f;
+float kBadPostureDeg = 35.0f;  // default; overridden by persisted app choice
 uint32_t trainingDelayedAlertMs = 5000UL;
 uint8_t trainingIntensity = TRAINING_DEFAULT_INTENSITY;
 static constexpr float kAngleClampDeg = 90.0f;
@@ -538,7 +538,11 @@ static void applyTrainingMotorFeedback(uint32_t now) {
   }
 
   isTrainingMotorAlertActive = true;
-  const unsigned long vibInterval = 500UL;
+  // Blink-style alert: short buzz, short gap (was 500 ms on / 500 ms off,
+  // which felt like one long beep).
+  static constexpr unsigned long kVibOnMs  = 120UL;
+  static constexpr unsigned long kVibOffMs = 180UL;
+  const unsigned long vibInterval = s_vibOn ? kVibOnMs : kVibOffMs;
   if ((now - s_vibToggleMs) >= vibInterval) {
     s_vibToggleMs = now;
     s_vibOn = !s_vibOn;
@@ -584,6 +588,10 @@ void trainingStop() {
 }
 
 void trainingSetup() {
+  const uint8_t savedDeg = storageLoadTrainingAngle();
+  if (savedDeg >= 5 && savedDeg <= 60) {
+    kBadPostureDeg = (float)savedDeg;
+  }
   initPostureSensor();
 }
 

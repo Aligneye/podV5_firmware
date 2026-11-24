@@ -716,6 +716,13 @@ uint32_t session_log_max_id() {
     return maxId;
 }
 
+void session_log_flush_now() {
+#if SESSION_LOG_HAS_FS
+    if (!g_ready) return;
+    if (g_pendingLen > 0 || g_needCompact) flushPending();
+#endif
+}
+
 void session_log_loop() {
 #if SESSION_LOG_HAS_FS
     if (!g_ready || (g_pendingLen == 0 && !g_needCompact)) return;

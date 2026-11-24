@@ -12,6 +12,8 @@ void bluetoothLoop();
 void bluetoothStartAdvertising();
 void bluetoothStopAdvertising();
 void bluetoothPrepareForSleep();
+/** Blocking: disconnect, clear all bonds/owner, silence radio. Used by power-off. */
+void bluetoothUnpairAndShutdown();
 bool bluetoothIsConnected();
 bool bluetoothIsAuthorized();
 bool bluetoothPairingWindowIsOpen();
@@ -22,6 +24,8 @@ void bluetoothClosePairingWindow();
 /** Safe from BLE RX callback: only sets a deferred flag (see calibration). */
 void bluetoothRequestCalibrationStart();
 void bluetoothRequestBatteryStatusBlink();
+/** Single-click LED: 5 s steady glow if paired, else the normal blink. */
+void bluetoothRequestClickLedGlow();
 void bluetoothNotifyStateChanged();
 void notifyCalibrationStatus(const char* calibResult, const char* complete);
 void notifyCalibrationComplete(bool success, uint32_t profileId, const char* name, uint16_t quality, uint16_t sampleCount, const char* reason, float refX = 0.0f, float refY = 0.0f, float refZ = 0.0f, uint16_t passedSamples = 0);

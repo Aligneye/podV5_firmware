@@ -31,6 +31,9 @@ static void printResetReason() {
 }
 
 void setup() {
+    // Must run before RESETREAS is cleared by printResetReason().
+    rtt.printf("[BOOT] RESETREAS=0x%08lX\n", (unsigned long)NRF_POWER->RESETREAS);
+    powerOnGate();
     logEvent("BOOT", "aligneye_firmware_v4");
     printResetReason();
     storageSetup();
@@ -51,6 +54,7 @@ void loop() {
     calibrationLoop();
     storageLoop();
     session_log_loop();
+    sessionStatsBackgroundLoop();
     sleepTimerLoop();
     rttDebuggerLoop();
     if (currentMode == MODE_IDLE || (millis() - lastModeChangeMs < lastModeChangeDelayMs)) {

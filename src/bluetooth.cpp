@@ -68,6 +68,7 @@ static uint8_t batteryPercentage = 0;
 static unsigned long lastBatteryReadMs = 0;
 static bool batteryReadValid = false;
 static bool batteryBlinkActive = false;
+static bool batteryGlowSolid = false;  // paired + single click: steady glow
 static unsigned long batteryBlinkStartMs = 0;
 
 // ── Session sync FSM ─────────────────────────────────────────────────────
@@ -120,6 +121,7 @@ static constexpr uint32_t THERAPY_LIVE_PACKET_INTERVAL_MS = 1000UL;
 static constexpr uint32_t STATUS_PACKET_INTERVAL_MS = 5000UL;
 static constexpr uint32_t BATTERY_BLINK_PERIOD_MS = 1000UL;
 static constexpr uint8_t BATTERY_BLINK_COUNT = 5;
+static constexpr uint32_t BATTERY_SOLID_GLOW_MS = 5000UL;
 static constexpr uint32_t UNPAIRED_RED_BLINK_PERIOD_MS = 160UL;
 static constexpr uint32_t CONNECTION_HAPTIC_DELAY_MS = 800UL;
 static constexpr uint16_t CONNECTION_HAPTIC_MS = 150U;
@@ -864,10 +866,12 @@ static bool loadAndVerifyOwnerBond(const BleOwnerRecord& record,
 }
 
 static void updateBatteryLed(uint8_t percentage, uint8_t brightness = 255) {
+    // Every LED indication uses exactly one channel chosen by battery level:
+    //   > 66 %  -> green (pin 14)   34..66 % -> blue (pin 15)   < 34 % -> red (pin 13)
     if (percentage >= 67) {
         setRgbLedPwm(0, brightness, 0);
     } else if (percentage >= 34) {
-        setRgbLedPwm(brightness, brightness, 0);
+        setRgbLedPwm(0, 0, brightness);
     } else {
         setRgbLedPwm(brightness, 0, 0);
     }
@@ -900,14 +904,25 @@ static void updateBatteryStatusBlink(unsigned long now) {
     updateBatteryReading(now);
 
     const unsigned long elapsed = now - batteryBlinkStartMs;
-    const unsigned long totalBlinkMs = (unsigned long)BATTERY_BLINK_COUNT * BATTERY_BLINK_PERIOD_MS;
+    const unsigned long totalBlinkMs = batteryGlowSolid
+        ? (unsigned long)BATTERY_SOLID_GLOW_MS
+        : (unsigned long)BATTERY_BLINK_COUNT * BATTERY_BLINK_PERIOD_MS;
     if (elapsed >= totalBlinkMs) {
         batteryBlinkActive = false;
+        batteryGlowSolid = false;
         turnRgbLedOff();
         return;
     }
 
-    const unsigned long phaseMs = elapsed % BATTERY_BLINK_PERIOD_MS;
+    if (batteryGlowSolid) {
+        updateBatteryLed(batteryPercentage, 255);
+        return;
+    }
+
+    // Start each blink cycle at full brightness so the mode change is visible
+    // the instant it happens (a 0 -> peak ramp hid it for up to 500 ms).
+    const unsigned long phaseMs =
+        (elapsed + (BATTERY_BLINK_PERIOD_MS / 2UL)) % BATTERY_BLINK_PERIOD_MS;
     uint8_t brightness = 0;
     if (phaseMs < (BATTERY_BLINK_PERIOD_MS / 2UL)) {
         brightness = (uint8_t)((phaseMs * 255UL) / (BATTERY_BLINK_PERIOD_MS / 2UL));
@@ -930,9 +945,11 @@ static bool updatePairingLed(unsigned long now) {
 
     // A fast red blink makes the physically opened enrollment window visible
     // to the user.  It stops as soon as the new owner is safely committed.
+    // Not connected yet: blink in the battery color (red/blue/green).
+    updateBatteryReading(now);
     const bool on = ((now / UNPAIRED_RED_BLINK_PERIOD_MS) & 1u) == 0u;
     if (on) {
-        setRgbLedPwm(255, 0, 0);
+        updateBatteryLed(batteryPercentage, 255);
     } else {
         turnRgbLedOff();
     }
@@ -1459,6 +1476,8 @@ static void processPairingLock(unsigned long now) {
                 if (connected) {
                     connectedPeerMatchesOwner = true;
                     authorizeCurrentLink(now);
+                    // No haptic beep on first pairing (owner just committed).
+                    connectionHapticPending = false;
                 } else {
                     pairingLockState = PairingLockState::OwnerLocked;
                     startAdvertising();
@@ -1696,6 +1715,9 @@ static bool startTrainingFromBle(TrainingAlertStyle subMode,
 
     trainingSubModeIndex = subMode;
     kBadPostureDeg = (float)difficultyAngle;
+    storageBeginBatch();
+    storageSaveTrainingAngle((uint8_t)difficultyAngle);
+    storageCommitBatchDeferred();
     trainingDelayedAlertMs = delayMs;
     trainingIntensity = intensity;
     deviceOn = true;
@@ -1723,6 +1745,7 @@ static bool startTherapyFromBle(uint32_t intensity, uint32_t durationMin, const 
     therapyIntensityLevel = (int)intensity;
     therapySubModeIndex = (durationMin == 10) ? 0 : (durationMin == 20) ? 1 : 2;
     therapySetDurationMinutes(durationMin);
+    therapySaveParams();
 
     deviceOn = true;
     setDeviceMode(MODE_THERAPY);
@@ -1905,6 +1928,9 @@ static void applyDifficultyDegrees(const String &valueRaw) {
     int deg = value.toInt();
     if (deg >= 5 && deg <= 60) {
         kBadPostureDeg = (float)deg;
+        storageBeginBatch();
+        storageSaveTrainingAngle((uint8_t)deg);
+        storageCommitBatchDeferred();
         char payload[48];
         snprintf(payload, sizeof(payload), "{\"difficulty_deg\":%d}", deg);
         // logPacket("BLE", payload);
@@ -2758,6 +2784,14 @@ void bluetoothSetup() {
 
         pCharacteristic = &gCharacteristic;
         initializePairingLock();
+        // Powering on (hold) is physical access: with no owner (e.g. after
+        // power-off unpaired everything) open the timed enrollment window so
+        // the app can pair without a separate button gesture.
+        if (pairingLockState == PairingLockState::NoOwnerClosed) {
+            pairingWindowStartedMs = millis();
+            pairingLockState = PairingLockState::PairingOpen;
+            rtt.println("[BLE LOCK] no owner at boot; pairing window opened");
+        }
         bleInitialized = true;
     }
 
@@ -3029,6 +3063,35 @@ void bluetoothPrepareForSleep() {
     }
 }
 
+void bluetoothUnpairAndShutdown() {
+    // Power-off path (hold button): drop the link, forget the owner/bond so the
+    // next power-on starts unpaired, and leave the radio silent. Blocking is
+    // fine here because the caller powers the device off immediately after.
+    sleepShutdownRequested = true;  // suppress advertising restarts
+    applicationAuthorized = false;
+    stopPairingAdvertising();
+
+    if (currentConnHandle != BLE_CONN_HANDLE_INVALID &&
+        Bluefruit.connected(currentConnHandle)) {
+        Bluefruit.disconnect(currentConnHandle);
+        const unsigned long start = millis();
+        while (connected && (millis() - start) < 1000UL) {
+            delay(10);
+        }
+    }
+
+    clearControllerPeerFilters();
+    Bluefruit.Periph.clearBonds();
+    clearOwnerRecordFiles();
+    memset(&ownerRecord, 0, sizeof(ownerRecord));
+    memset(&ownerBond, 0, sizeof(ownerBond));
+    ownerRecordValid = false;
+    connectedPeerMatchesOwner = false;
+    pairingLockState = PairingLockState::NoOwnerClosed;
+    stopPairingAdvertising();
+    rtt.println("[BLE LOCK] unpaired for power off");
+}
+
 bool bluetoothIsConnected() {
     return connected;
 }
@@ -3095,8 +3158,16 @@ void bluetoothRequestCalibrationStart() {
 }
 
 void bluetoothRequestBatteryStatusBlink() {
+    // Battery-colored indication (red <34, blue 34-66, green >66):
+    // Paired (locked to a phone; connected or not) -> steady glow for 5 s.
+    // Never paired -> blinking.
     batteryBlinkActive = true;
+    batteryGlowSolid = ownerRecordValid;
     batteryBlinkStartMs = 0UL;
+}
+
+void bluetoothRequestClickLedGlow() {
+    bluetoothRequestBatteryStatusBlink();
 }
 
 void bluetoothNotifyStateChanged() {
